@@ -50,6 +50,9 @@ class LLMProvider(ABC):
     #: Does this provider have a native structured-output / JSON mode?
     supports_json_mode: bool = False
 
+    #: Can this provider stream its response as text fragments (generate_stream)?
+    supports_streaming: bool = False
+
     @abstractmethod
     async def generate(
         self,

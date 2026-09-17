@@ -138,6 +138,49 @@ def select_context(form: dict[str, Any], prompt: str) -> ContextSelection:
     )
 
 
+def select_context_for_ids(
+    form: dict[str, Any], target_ids: list[str]
+) -> ContextSelection:
+    """
+    Build context for an EXPLICIT set of target field ids (the "reference chip"
+    flow — the admin attached specific fields from the canvas).
+
+    No resolution, no clarification: the admin already told us which fields.
+    We include the targets plus their bounded dependency neighborhood so the
+    model can edit them correctly. Unknown ids are ignored; if none resolve, we
+    fall back to the full compact form.
+    """
+    index = build_index(form)
+    known = [fid for fid in target_ids if index.has_id(fid)]
+    if not known:
+        return _full_form(form, reason="attached ids not found in form")
+
+    graph = build_dependency_graph(index)
+    ids: set[str] = set(known)
+    truncated = False
+    for fid in known:
+        nb = neighborhood(graph, fid, depth=_NEIGHBORHOOD_DEPTH, max_size=_NEIGHBORHOOD_MAX)
+        ids |= nb.ids
+        truncated = truncated or nb.truncated
+        if len(ids) > _NEIGHBORHOOD_MAX * 2:
+            truncated = True
+            break
+
+    if truncated:
+        return _full_form(
+            form,
+            reason="attached fields' dependency scope too large",
+            target_ids=known,
+        )
+
+    return ContextSelection(
+        level=ContextLevel.TARGETED_DEPENDENCY,
+        context=_targeted_context(index, sorted(ids)),
+        target_ids=known,
+        reason=f"{len(known)} attached field(s) + dependencies",
+    )
+
+
 # --- Context construction ---------------------------------------------------
 
 

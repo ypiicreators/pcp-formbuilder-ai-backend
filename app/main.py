@@ -5,6 +5,8 @@ Run locally with:
     uvicorn app.main:app --reload
 """
 
+import logging
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -12,6 +14,13 @@ from app.api.routes import router
 from app.config import get_settings
 
 settings = get_settings()
+
+# Emit our app.* INFO logs (timing/telemetry) to the console. Without this the
+# root logger defaults to WARNING and the timing lines would be swallowed.
+logging.basicConfig(
+    level=logging.INFO if settings.debug else logging.WARNING,
+    format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+)
 
 app = FastAPI(
     title=settings.app_name,

@@ -76,6 +76,35 @@ class GenerateNlRequest(BaseModel):
     prompt: str = Field(..., min_length=1, description="Natural-language description of the form.")
 
 
+class AssistRequest(BaseModel):
+    """
+    JSON body for the unified POST /api/form-ai/assist endpoint (chat flow).
+
+    One entry point for the whole conversation. The backend infers the mode from
+    the inputs:
+      - base_json ABSENT  -> GENERATE a new form from `prompt` (first message)
+      - base_json PRESENT -> EDIT that form with `prompt` (every later message)
+      - (document mode is deferred; a `file` field would route there later)
+
+    The frontend holds the running form and passes it back as base_json for each
+    follow-up message.
+    """
+
+    prompt: str = Field(..., min_length=1, description="The user's chat message / instruction.")
+    base_json: dict[str, Any] | None = Field(
+        default=None,
+        description="The current form so far. Omit on the first message (generate).",
+    )
+    target_field_ids: list[str] | None = Field(
+        default=None,
+        description=(
+            "Optional explicit field ids the change applies to (the 'reference "
+            "chip' flow — fields attached from the canvas). When present, the "
+            "edit targets exactly these fields; no resolution/clarification."
+        ),
+    )
+
+
 # --- Response outcome: proposal (success) -----------------------------------
 
 

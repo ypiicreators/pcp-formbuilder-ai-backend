@@ -40,7 +40,7 @@ from app.core.change_set import (
     diff_to_dicts,
     parse_change_set,
 )
-from app.core.context_selector import ContextLevel, select_context
+from app.core.context_selector import ContextLevel, select_context, select_context_for_ids
 from app.core.form_index import build_index
 from app.core.change_set import Op  # noqa: F401  (re-exported for typing clarity)
 from app.prompts.system_prompt import get_system_prompt
@@ -82,6 +82,7 @@ async def run_edit_flow(
     instruction: str,
     provider: LLMProvider,
     *,
+    target_field_ids: list[str] | None = None,
     max_repair_attempts: int | None = None,
 ) -> EditResult:
     """
@@ -89,19 +90,27 @@ async def run_edit_flow(
 
     `provider` is injected so tests can supply a fake. Production passes the
     factory-built provider.
+
+    `target_field_ids` (the "reference chip" flow): when the admin has attached
+    specific fields, we edit exactly those — bypassing NL target resolution and
+    the clarification step entirely (they already told us the targets).
     """
     if max_repair_attempts is None:
         max_repair_attempts = get_settings().max_repair_attempts
 
     # --- 1. Context selection (deterministic) -----------------------------
-    selection = select_context(form, instruction)
+    if target_field_ids:
+        # Explicit targets attached from the canvas -> no resolution/clarify.
+        selection = select_context_for_ids(form, target_field_ids)
+    else:
+        selection = select_context(form, instruction)
 
-    if selection.level is ContextLevel.CLARIFY:
-        return EditResult(
-            status=EditStatus.NEEDS_CLARIFICATION,
-            clarification=selection.clarification,
-            context_level=selection.level.value,
-        )
+        if selection.level is ContextLevel.CLARIFY:
+            return EditResult(
+                status=EditStatus.NEEDS_CLARIFICATION,
+                clarification=selection.clarification,
+                context_level=selection.level.value,
+            )
 
     # --- 2. First LLM call ------------------------------------------------
     system_prompt = get_system_prompt()
