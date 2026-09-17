@@ -26,6 +26,7 @@ cp .env.example .env   # then fill in real values
 
 ```bash
 uvicorn app.main:app --reload
+.venv/bin/uvicorn app.main:app --reload --port 8000
 ```
 
 - API docs: http://localhost:8000/docs
