@@ -156,6 +156,79 @@ def _check_field(fld: dict[str, Any], path: str) -> list[ValidationError]:
     # 7. validators, if present, must use known types
     out += _check_validators(fld.get("validators"), fid, path)
 
+    # 8. feature-contract shape checks (transliteration/translation/etc.)
+    out += _check_feature_contracts(fld, fid, path)
+
+    return out
+
+
+def _check_feature_contracts(
+    fld: dict[str, Any], fid: str, path: str
+) -> list[ValidationError]:
+    """
+    Enforce the FLAT-PROPERTY feature contracts (see prompts/constants.py
+    FEATURE_CONTRACTS). Catches the common LLM mistakes:
+      - transliteration/translation enabled but missing its target field
+      - a feature target that points at the field itself
+      - a `translate_textarea` field that carries none of the transliteration
+        properties (the model invented a type instead of using the feature)
+    Self-referential targets and enabled-without-target are hard errors so the
+    repair loop corrects them; existence of the target is checked (softly) in
+    business_rules.
+    """
+    out: list[ValidationError] = []
+    ftype = fld.get("type")
+
+    # transliteration: if enabled, transliterationField is required and must not
+    # be the field itself.
+    if fld.get("transliteration") is True:
+        target = fld.get("transliterationField")
+        if not isinstance(target, str) or not target.strip():
+            out.append(_err(
+                "transliteration_missing_target",
+                f"field '{fid}' has \"transliteration\": true but no "
+                f"\"transliterationField\" (the id of the paired field)",
+                path, fid,
+            ))
+        elif target == fid:
+            out.append(_err(
+                "transliteration_self_reference",
+                f"field '{fid}' \"transliterationField\" must reference the OTHER "
+                f"field in the pair, not itself",
+                path, fid,
+            ))
+
+    # translation (NMT): same rule with translationField.
+    if fld.get("translation") is True:
+        target = fld.get("translationField")
+        if not isinstance(target, str) or not target.strip():
+            out.append(_err(
+                "translation_missing_target",
+                f"field '{fid}' has \"translation\": true but no "
+                f"\"translationField\" (the target field id)",
+                path, fid,
+            ))
+        elif target == fid:
+            out.append(_err(
+                "translation_self_reference",
+                f"field '{fid}' \"translationField\" must reference the target "
+                f"field, not itself",
+                path, fid,
+            ))
+
+    # translate_textarea used as a "type" without the transliteration feature is
+    # almost always the model inventing a type instead of using the flat feature.
+    # Nudge it toward the correct shape.
+    if ftype == "translate_textarea" and fld.get("transliteration") is not True:
+        out.append(_err(
+            "translate_textarea_without_feature",
+            f"field '{fid}' uses type 'translate_textarea' but does not set the "
+            f"transliteration feature. Prefer type 'text'/'textarea' with "
+            f"\"transliteration\": true and \"transliterationField\": \"<other field id>\". "
+            f"Do not use \"sourceField\"/\"dependsOn\" for transliteration.",
+            path, fid,
+        ))
+
     return out
 
 

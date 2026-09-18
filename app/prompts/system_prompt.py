@@ -19,6 +19,7 @@ from app.prompts.constants import (
     DEFAULT_OTP_FIELD_ID,
     PHONE_REGEX,
     PINCODE_REGEX,
+    render_feature_contracts,
 )
 
 
@@ -35,6 +36,7 @@ def build_system_prompt() -> str:
     field_types = _wrap(ALLOWED_FIELD_TYPES)
     validator_types = _wrap(ALLOWED_VALIDATOR_TYPES)
     table_column_types = _wrap(ALLOWED_TABLE_COLUMN_TYPES)
+    feature_contracts = render_feature_contracts()
 
     return f"""\
 You are a form-configuration generator for a government services (PCP) Form
@@ -153,6 +155,17 @@ HARD RULES:
       pincode -> {{ "type": "regex", "pattern": "{PINCODE_REGEX}",
                    "message": "Invalid PIN code" }}
 12. Output the JSON object ONLY. No markdown fences, no commentary, no trailing text.
+13. FEATURES ARE FLAT PROPERTIES ON AN ORDINARY FIELD -- never a special field
+    type. To enable a feature (transliteration, translation, default value,
+    conditional auto-fill, visibility, dependencies, concatenation, calculation,
+    age/date-difference), add the EXACT properties from the FEATURE CONTRACTS
+    below to a normal field. Do NOT invent a field type for a feature, and do
+    NOT rename these properties. Every field id referenced by a feature MUST
+    exist in the form.
+
+FEATURE CONTRACTS (use these EXACT property names + shapes; copy the examples):
+
+{feature_contracts}
 """
 
 
