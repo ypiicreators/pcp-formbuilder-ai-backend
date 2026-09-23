@@ -106,7 +106,11 @@ EXTRACTED DOCUMENT TEXT:
 """
 
 
-def build_edit_prompt(context: dict, instruction: str) -> str:
+def build_edit_prompt(
+    context: dict,
+    instruction: str,
+    target_field_ids: list[str] | None = None,
+) -> str:
     """
     Mode C -- edit existing form. Produces an ID-anchored CHANGE-SET (not the
     whole form).
@@ -117,6 +121,16 @@ def build_edit_prompt(context: dict, instruction: str) -> str:
     to it there. Reference fields by the ids shown in the context.
     """
     context_text = json.dumps(context, indent=2, ensure_ascii=False)
+    target_section = ""
+    if target_field_ids:
+        targets_list = "\n".join(f"- {tid}" for tid in target_field_ids)
+        target_section = f"""
+TARGET FIELD(S) SPECIFIED BY USER:
+The user explicitly selected and attached the following field(s) for this edit:
+{targets_list}
+
+Apply the requested changes specifically to the target field(s) listed above. Do not modify other fields unless strictly necessary due to dependency rules.
+"""
     return f"""\
 MODE: edit_existing
 
@@ -151,7 +165,7 @@ RULES:
 - If a field shows "features" (e.g. visibleWhen, conditionalAutoFillWhen), respect
   those relationships when changing it.
 - Output the JSON array ONLY. No markdown fences, no commentary.
-
+{target_section}
 COMPACT VIEW OF THE FORM:
 \"\"\"
 {context_text}

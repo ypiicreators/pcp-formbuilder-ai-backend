@@ -105,6 +105,53 @@ class AssistRequest(BaseModel):
     )
 
 
+class WorkflowAssistRequest(BaseModel):
+    """
+    JSON body for the unified POST /api/workflow-ai/assist endpoint.
+
+    Identical in purpose to AssistRequest but scoped to the Workflow Builder
+    (officer action UI schema / actionUiSchema). The key difference is that
+    base_json accepts EITHER:
+      - a dict  { "sections": [...] }  — sections-based workflow form
+      - a list  [ { id, type, ... } ]  — flat Field[] array workflow form
+
+    Both shapes are valid workflow outputs. The backend normalises flat arrays
+    to sections internally before processing and denormalises back before
+    returning so the frontend always gets the same shape it sent.
+
+    Mode inference (same as AssistRequest):
+      - base_json ABSENT  -> GENERATE a new workflow form from `prompt`
+      - base_json PRESENT -> EDIT that workflow form with `prompt`
+    """
+
+    prompt: str = Field(
+        ...,
+        min_length=1,
+        description="The user's chat message / instruction.",
+    )
+    base_json: dict[str, Any] | list[dict[str, Any]] | None = Field(
+        default=None,
+        description=(
+            "The current workflow form so far. Omit on the first message (generate). "
+            "Accepts either a sections object { 'sections': [...] } or a flat "
+            "Field[] array [ { id, type, label, ... }, ... ]."
+        ),
+    )
+    target_field_ids: list[str] | None = Field(
+        default=None,
+        description=(
+            "Optional explicit field ids the change applies to (the 'reference "
+            "chip' flow). When present, edits exactly these fields; no "
+            "resolution/clarification step."
+        ),
+    )
+
+    @property
+    def base_json_is_flat(self) -> bool:
+        """True when base_json was sent as a flat Field[] array."""
+        return isinstance(self.base_json, list)
+
+
 # --- Response outcome: proposal (success) -----------------------------------
 
 
@@ -115,14 +162,21 @@ class GenerateResponse(BaseModel):
     `status` discriminates this from a clarification request so the frontend can
     branch on a single field. The AI never writes to the store; this is a
     proposal the admin reviews and applies via `loadFromJSON()`.
+
+    NOTE: `form` accepts both dict and list to support the Workflow Builder,
+    which can return a flat Field[] array when the input was a flat array.
+    The Form Builder always returns a dict (sections object). The frontend
+    determines which shape to expect based on which endpoint was called and
+    what shape was originally sent.
     """
 
     status: Literal["proposal"] = "proposal"
-    form: dict[str, Any] = Field(
+    form: dict[str, Any] | list[dict[str, Any]] = Field(
         ...,
         description=(
-            "Flat, loadFromJSON-ready form object. Starts at jurisdiction/sections; "
-            "no top-level metadata; no `order` keys."
+            "The form object. For the Form Builder: a sections object "
+            "{ sections: [...] }. For the Workflow Builder: either a sections "
+            "object or a flat Field[] array, matching the shape of the input."
         ),
     )
     warnings: list[str] = Field(

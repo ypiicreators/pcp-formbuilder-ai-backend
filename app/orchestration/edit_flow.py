@@ -114,7 +114,9 @@ async def run_edit_flow(
 
     # --- 2. First LLM call ------------------------------------------------
     system_prompt = get_system_prompt()
-    user_prompt = build_edit_prompt(selection.context or {}, instruction)
+    user_prompt = build_edit_prompt(
+        selection.context or {}, instruction, target_field_ids=target_field_ids
+    )
 
     try:
         raw = await provider.generate(system_prompt, user_prompt)
