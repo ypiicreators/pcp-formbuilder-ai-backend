@@ -12,6 +12,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.routes import router
 from app.config import get_settings
+from app.graph_agent.api import router as graph_agent_router
 
 settings = get_settings()
 
@@ -39,6 +40,7 @@ app.add_middleware(
 
 # All routes are served under /api (e.g. /api/form-ai/generate, /api/health).
 app.include_router(router, prefix="/api")
+app.include_router(graph_agent_router, prefix="/api")
 
 
 @app.get("/", tags=["meta"])

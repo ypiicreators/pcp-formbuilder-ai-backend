@@ -47,6 +47,8 @@ class OpType(str, Enum):
     REMOVE_OPTION = "removeOption" # remove an option (by value) from a field
     ADD_FIELD = "addField"         # add a new field to a section
     REMOVE_FIELD = "removeField"   # remove an existing field
+    ADD_COLUMN = "addColumn"       # append a column to a table / computed_table / verification
+    REMOVE_COLUMN = "removeColumn" # remove a column from a table-like field
 
 
 #: Top-level keys the change-set must never touch (backend-owned metadata).
@@ -127,6 +129,16 @@ def parse_change_set(payload: Any) -> ParseResult:
 
     if not isinstance(payload, list):
         result.errors.append("change-set must be a list of operations (or {changes: [...]})")
+        return result
+
+    if len(payload) == 0:
+        result.errors.append(
+            "change-set is empty. If the instruction adds columns, enables a "
+            "feature, or otherwise changes the form, emit operations. Use "
+            "addColumn (not addField) to add table columns. To enable "
+            "transliteration, set transliteration true AND transliterationField "
+            "on the source field/column (add a sibling *_pa column first if needed)."
+        )
         return result
 
     for i, raw in enumerate(payload):
@@ -237,6 +249,22 @@ def _parse_one(op_type: OpType, raw: dict, i: int) -> tuple[Op | None, str]:
             return None, f"op[{i}] removeField requires 'fieldId'"
         return Op(type=op_type, field_id=fid, raw=raw), ""
 
+    if op_type is OpType.ADD_COLUMN:
+        tid = raw.get("tableId", "")
+        newc = raw.get("value")
+        if not tid:
+            return None, f"op[{i}] addColumn requires 'tableId'"
+        if not isinstance(newc, dict) or not newc.get("id") or not newc.get("type"):
+            return None, f"op[{i}] addColumn 'value' must be a column object with id+type"
+        return Op(type=op_type, table_id=tid, field_id=str(newc["id"]),
+                  value=newc, raw=raw), ""
+
+    if op_type is OpType.REMOVE_COLUMN:
+        tid = raw.get("tableId", "")
+        if not tid or not fid:
+            return None, f"op[{i}] removeColumn requires 'tableId' and 'fieldId' (column id)"
+        return Op(type=op_type, table_id=tid, field_id=fid, raw=raw), ""
+
     return None, f"op[{i}] unsupported op '{op_type.value}'"
 
 
@@ -249,20 +277,27 @@ def apply_change_set(form: dict[str, Any], ops: list[Op]) -> ApplyResult:
 
     Validates every op against the current form state, then mutates. If ANY op
     fails, returns the untouched original with the collected errors — nothing is
-    partially applied (plan §9). Structural ops (addField/removeField) rebuild
-    the index so later ops see the updated form.
+    partially applied (plan §9). Structural ops (addField/removeField/
+    addColumn/removeColumn) rebuild the index so later ops see the updated form.
     """
     working = copy.deepcopy(form)
     errors: list[str] = []
     applied: list[str] = []
 
     # First pass: validate all ops against the ORIGINAL state so we can bail
-    # before mutating. addField ids are excluded from the "must exist" check.
+    # before mutating. addField / addColumn ids are excluded from the
+    # "must exist" check so later setColumnProp can target a column added
+    # in the same change-set.
     index = build_index(working)
     pending_new_ids = {op.field_id for op in ops if op.type is OpType.ADD_FIELD}
+    pending_new_columns = {
+        (op.table_id, op.field_id) for op in ops if op.type is OpType.ADD_COLUMN
+    }
 
     for op in ops:
-        err = _validate_op_targets(op, index, working, pending_new_ids)
+        err = _validate_op_targets(
+            op, index, working, pending_new_ids, pending_new_columns
+        )
         if err:
             errors.append(err)
 
@@ -275,7 +310,8 @@ def apply_change_set(form: dict[str, Any], ops: list[Op]) -> ApplyResult:
             changed_id = _apply_one(op, working)
             if changed_id:
                 applied.append(changed_id)
-            if op.type in (OpType.ADD_FIELD, OpType.REMOVE_FIELD):
+            if op.type in (OpType.ADD_FIELD, OpType.REMOVE_FIELD,
+                           OpType.ADD_COLUMN, OpType.REMOVE_COLUMN):
                 index = build_index(working)
         except Exception as exc:  # defensive: never leak a half-applied form
             return ApplyResult(
@@ -286,8 +322,16 @@ def apply_change_set(form: dict[str, Any], ops: list[Op]) -> ApplyResult:
     return ApplyResult(form=working, applied_field_ids=applied)
 
 
-def _validate_op_targets(op: Op, index, form: dict, pending_new_ids: set) -> str:
+def _validate_op_targets(
+    op: Op,
+    index,
+    form: dict,
+    pending_new_ids: set,
+    pending_new_columns: set | None = None,
+) -> str:
     """Check that an op's target ids resolve in the current form."""
+    pending_new_columns = pending_new_columns or set()
+
     if op.type in (OpType.SET_PROP, OpType.UNSET_PROP, OpType.REMOVE_FIELD,
                    OpType.ADD_OPTION, OpType.REMOVE_OPTION):
         if not index.has_id(op.field_id):
@@ -298,8 +342,11 @@ def _validate_op_targets(op: Op, index, form: dict, pending_new_ids: set) -> str
         if entry and entry.node.get("type") not in ("select", "multiselect", "radio"):
             return f"{op.type.value} field '{op.field_id}' is not an option-bearing type"
 
-    if op.type in (OpType.SET_COLUMN_PROP, OpType.UNSET_COLUMN_PROP):
-        if not index.get_column(op.table_id, op.field_id):
+    if op.type in (OpType.SET_COLUMN_PROP, OpType.UNSET_COLUMN_PROP,
+                   OpType.REMOVE_COLUMN):
+        if (op.table_id, op.field_id) in pending_new_columns:
+            pass  # column is created by addColumn in this same change-set
+        elif not index.get_column(op.table_id, op.field_id):
             return (f"{op.type.value} targets unknown column "
                     f"'{op.table_id}.{op.field_id}'")
 
@@ -310,6 +357,16 @@ def _validate_op_targets(op: Op, index, form: dict, pending_new_ids: set) -> str
         existing = index.all_field_ids() | (pending_new_ids - {op.field_id})
         if op.field_id in existing:
             return f"addField id '{op.field_id}' already exists"
+
+    if op.type is OpType.ADD_COLUMN:
+        table = index.get_field(op.table_id)
+        if table is None:
+            return f"addColumn targets unknown table '{op.table_id}'"
+        if table.node.get("type") not in COLUMN_BEARING_TYPES:
+            return (f"addColumn target '{op.table_id}' is type "
+                    f"'{table.node.get('type')}', not a table")
+        if index.get_column(op.table_id, op.field_id):
+            return f"addColumn id '{op.field_id}' already exists on '{op.table_id}'"
 
     return ""
 
@@ -353,6 +410,20 @@ def _apply_one(op: Op, form: dict) -> str:
     if op.type is OpType.REMOVE_FIELD:
         _remove_field_everywhere(form, op.field_id)
         return op.field_id
+
+    if op.type is OpType.ADD_COLUMN:
+        table = index.get_field(op.table_id)
+        table.node.setdefault("columns", []).append(copy.deepcopy(op.value))
+        return op.table_id
+
+    if op.type is OpType.REMOVE_COLUMN:
+        table = index.get_field(op.table_id)
+        cols = table.node.get("columns") or []
+        table.node["columns"] = [
+            c for c in cols
+            if not (isinstance(c, dict) and c.get("id") == op.field_id)
+        ]
+        return op.table_id
 
     return ""
 

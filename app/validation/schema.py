@@ -19,6 +19,11 @@ from __future__ import annotations
 from typing import Any
 
 from app.core.form_index import COLUMN_BEARING_TYPES, FormIndex, NodeKind
+from app.prompts.constants import (
+    ROW_KEY_STRATEGIES,
+    ROW_VALIDATOR_TYPE,
+    TABLE_VALIDATOR_TYPES,
+)
 from app.validation.result import Level, ValidationError
 
 # --- Allowed value sets (from formBuilder.types.ts) -------------------------
@@ -159,6 +164,10 @@ def _check_field(fld: dict[str, Any], path: str) -> list[ValidationError]:
     # 8. feature-contract shape checks (transliteration/translation/etc.)
     out += _check_feature_contracts(fld, fid, path)
 
+    # 9. table-specific row-action / key / validator / list-column shape
+    if ftype == "table":
+        out += _check_table_config(fld, fid, path)
+
     return out
 
 
@@ -232,6 +241,163 @@ def _check_feature_contracts(
     return out
 
 
+def _check_table_config(
+    fld: dict[str, Any], fid: str, path: str
+) -> list[ValidationError]:
+    """
+    Shape checks for table-only properties the admin Form Builder emits.
+    Presence is optional (omit unless the requirement needs them); when present
+    they must match jsonGenerator.ts / formBuilder.types.ts.
+    """
+    out: list[ValidationError] = []
+    col_ids = {
+        str(c.get("id"))
+        for c in fld.get("columns") or []
+        if isinstance(c, dict) and c.get("id")
+    }
+
+    strategy = fld.get("rowKeyStrategy")
+    if strategy is not None and strategy not in ROW_KEY_STRATEGIES:
+        out.append(_err(
+            "invalid_row_key_strategy",
+            f"field '{fid}' rowKeyStrategy must be one of {ROW_KEY_STRATEGIES}, "
+            f"got '{strategy}'",
+            path, fid,
+        ))
+
+    for key in ("disableEditWhen", "disableDeleteWhen"):
+        val = fld.get(key)
+        if val is not None and not isinstance(val, str):
+            out.append(_err(
+                "invalid_row_action_when",
+                f"field '{fid}' \"{key}\" must be a string expression over column "
+                f"ids, not {type(val).__name__}",
+                path, fid,
+            ))
+
+    row_validators = fld.get("rowValidators")
+    if row_validators is not None:
+        if not isinstance(row_validators, list):
+            out.append(_err(
+                "invalid_row_validators",
+                f"field '{fid}' rowValidators must be an array",
+                path, fid,
+            ))
+        else:
+            for i, rv in enumerate(row_validators):
+                if not isinstance(rv, dict):
+                    out.append(_err(
+                        "invalid_row_validator",
+                        f"field '{fid}' rowValidators[{i}] must be an object",
+                        path, fid,
+                    ))
+                    continue
+                if rv.get("type") not in (None, ROW_VALIDATOR_TYPE):
+                    out.append(_err(
+                        "invalid_row_validator_type",
+                        f"field '{fid}' rowValidators[{i}] type must be "
+                        f"'{ROW_VALIDATOR_TYPE}'",
+                        path, fid,
+                    ))
+                if not isinstance(rv.get("expression"), str) or not rv["expression"].strip():
+                    out.append(_err(
+                        "missing_row_validator_expression",
+                        f"field '{fid}' rowValidators[{i}] needs a non-empty "
+                        f"\"expression\"",
+                        path, fid,
+                    ))
+                out += _check_localized(
+                    rv.get("errorMessage"),
+                    f"field '{fid}' rowValidators[{i}] errorMessage",
+                    path, fid,
+                )
+
+    table_validators = fld.get("tableValidators")
+    if table_validators is not None:
+        if not isinstance(table_validators, list):
+            out.append(_err(
+                "invalid_table_validators",
+                f"field '{fid}' tableValidators must be an array",
+                path, fid,
+            ))
+        else:
+            for i, tv in enumerate(table_validators):
+                if not isinstance(tv, dict):
+                    out.append(_err(
+                        "invalid_table_validator",
+                        f"field '{fid}' tableValidators[{i}] must be an object",
+                        path, fid,
+                    ))
+                    continue
+                vtype = tv.get("type")
+                if vtype is not None and vtype not in TABLE_VALIDATOR_TYPES:
+                    out.append(_err(
+                        "invalid_table_validator_type",
+                        f"field '{fid}' tableValidators[{i}] type must be one of "
+                        f"{TABLE_VALIDATOR_TYPES}",
+                        path, fid,
+                    ))
+                if vtype == "uniqueCombo":
+                    fields = tv.get("fields")
+                    if not isinstance(fields, list) or not fields:
+                        out.append(_err(
+                            "missing_unique_combo_fields",
+                            f"field '{fid}' tableValidators[{i}] uniqueCombo needs "
+                            f"a non-empty \"fields\" array of column ids",
+                            path, fid,
+                        ))
+                    else:
+                        for col_id in fields:
+                            if isinstance(col_id, str) and col_id and col_id not in col_ids:
+                                out.append(_err(
+                                    "unknown_unique_combo_column",
+                                    f"field '{fid}' tableValidators[{i}] fields "
+                                    f"references unknown column '{col_id}'",
+                                    path, fid,
+                                ))
+                out += _check_localized(
+                    tv.get("errorMessage"),
+                    f"field '{fid}' tableValidators[{i}] errorMessage",
+                    path, fid,
+                )
+
+    list_columns = fld.get("listColumns")
+    if list_columns is not None:
+        if not isinstance(list_columns, list):
+            out.append(_err(
+                "invalid_list_columns",
+                f"field '{fid}' listColumns must be an array of column ids",
+                path, fid,
+            ))
+        else:
+            if fld.get("enableListColumns") is not True:
+                out.append(_err(
+                    "list_columns_without_flag",
+                    f"field '{fid}' has listColumns but enableListColumns is not "
+                    f"true — set \"enableListColumns\": true",
+                    path, fid,
+                ))
+            for col_id in list_columns:
+                if isinstance(col_id, str) and col_id and col_id not in col_ids:
+                    out.append(_err(
+                        "unknown_list_column",
+                        f"field '{fid}' listColumns references unknown column "
+                        f"'{col_id}'",
+                        path, fid,
+                    ))
+
+    for flag in ("showAsTag", "dynamicId"):
+        if fld.get(flag):
+            out.append(_err(
+                "column_flag_on_table",
+                f"field '{fid}' has \"{flag}\" on the table field — it belongs on "
+                f"a column in \"columns\"",
+                path, fid,
+            ))
+
+    return out
+
+
 # --- Column-level checks ----------------------------------------------------
 
 
@@ -261,6 +427,8 @@ def _check_column(col: dict[str, Any], path: str) -> list[ValidationError]:
             ))
 
     out += _check_validators(col.get("validators"), cid, path)
+    # Column transliteration/translation use the same flat keys as fields.
+    out += _check_feature_contracts(col, cid, path)
     return out
 
 

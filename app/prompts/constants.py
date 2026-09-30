@@ -165,14 +165,18 @@ FEATURE_CONTRACTS: list[dict] = [
             "transliteration": "boolean -- true to enable",
             "transliterationField": (
                 "string -- the id of the OTHER field in the pair (the field whose "
-                "text drives / receives the conversion). Must be an existing field id."
+                "text drives / receives the conversion). Must be an existing field "
+                "id, or for table columns a sibling column id."
             ),
             "transliterationWhen": (
                 'optional { "targetEmpty"?: boolean, "on"?: string[] } '
                 '(e.g. "on": ["blur"])'
             ),
         },
-        "applies_to": "most input fields (text, textarea, number, select, ...)",
+        "applies_to": (
+            "most input fields (text, textarea, number, select, ...) AND table "
+            "columns (transliterationField then names a sibling COLUMN id)"
+        ),
         "example": {
             "id": "applicant_name_punjabi",
             "type": "textarea",
@@ -393,7 +397,170 @@ FEATURE_CONTRACTS: list[dict] = [
             'using sourceField/endDateField for transliteration or auto-fill (unrelated features)',
         ],
     },
+    {
+        "name": "Table field configuration (row actions, keys, validators, columns)",
+        "summary": (
+            "A type 'table' field is an editable repeating row of columns. "
+            "Row-action flags, row-key strategy, row/table validators, list-column "
+            "subset, and per-column flags (showAsTag, dynamicId, transliteration) "
+            "are FLAT properties on the table field / its columns -- the same keys "
+            "the admin Form Builder config panel writes. Omit a key unless the "
+            "requirement needs it; when creating a typical table, include "
+            "minRows/maxRows and rowKey/rowKeyStrategy defaults."
+        ),
+        "properties": {
+            "columns": (
+                "REQUIRED TableColumn[]. Each column: id, label, type, plus optional "
+                "required, readonly, hidden, placeholder, options, validators, formula, "
+                "showAsTag, dynamicId, transliteration, transliterationField, "
+                "transliterationWhen, trim, capitalizeFirstWord, capitalizeAll, "
+                "visibleWhen, hiddenWhen, disabledWhen, conditionalAutoFillWhen, dependsOn"
+            ),
+            "minRows": "number -- default minimum rows (typically 1)",
+            "maxRows": "number -- default maximum rows (typically 10)",
+            "disableMinMaxRows": "boolean -- skip min/max row validation and hide the UI counters",
+            "conditionalRows": (
+                "optional array of { field, operator?, value, minRows?, maxRows? } "
+                "-- different row limits based on another field's value"
+            ),
+            "addRowLabel": "LocalizedText -- Add Row button text",
+            "removeRowLabel": "LocalizedText -- Remove/delete row button text",
+            "disableAddRow": "boolean -- hide the Add Row button for the whole table",
+            "disableEdit": "boolean -- hide Edit on every row",
+            "disableDelete": "boolean -- hide Delete on every row",
+            "disableEditWhen": (
+                "string expression over column ids; when true, hide Edit for THAT row "
+                '(e.g. is_deleted == 1). Ignored if disableEdit is true. NOT a visibleWhen map.'
+            ),
+            "disableDeleteWhen": (
+                "string expression over column ids; when true, hide Delete for THAT row. "
+                "Ignored if disableDelete is true. NOT a visibleWhen map."
+            ),
+            "rowKey": 'string -- column/field name used as the unique row id (default "row_id")',
+            "rowKeyStrategy": '"uuid" | "auto" | "manual" -- how row keys are generated (default "uuid")',
+            "rowValidators": (
+                "array of { type: \"custom\", expression: string, errorMessage: LocalizedText } "
+                "-- cross-column checks within a single row"
+            ),
+            "tableValidators": (
+                "array of { type: \"uniqueCombo\", fields: string[] (column ids), "
+                "errorMessage: LocalizedText } -- uniqueness across rows. Do NOT use "
+                "type minRows/maxRows here; those are the field properties minRows/maxRows."
+            ),
+            "enableListColumns": "boolean -- table list shows only listColumns; the add/edit drawer still has every column",
+            "listColumns": "string[] of column ids visible in the table list (requires enableListColumns)",
+            "showAsTag": "boolean ON A COLUMN -- render that cell as a tag in the table list",
+            "dynamicId": (
+                "boolean ON A COLUMN -- append the row number to the column id "
+                '(activity_name -> activity_name1). Do not set on verification-field columns.'
+            ),
+            "options": (
+                "STATIC dropdown data on a select|multiselect|radio COLUMN: "
+                "[{ \"value\": string, \"label\": LocalizedText }, ...]. "
+                "This is the Form Builder 'Static Options' source (no datasource). "
+                "When the user lists values for a column, or says static data on "
+                "ALL columns, put an options array on EACH such column. Convert a "
+                "text column to type select if the user gave it a fixed list. "
+                "Each column has its OWN options — never one shared list on the table field."
+            ),
+            "conditionalAutoFillWhen": (
+                "optional STATIC DEFAULT cell value (not the dropdown list): "
+                "[{ \"condition\": { \"field\": string, \"operator\"?: string, \"value\": any }, "
+                "\"autoFill\": { \"source\": \"static\", \"value\": any }, \"lock\"?: boolean }]. "
+                "Use when the user wants a pre-filled value (e.g. country always India)."
+            ),
+        },
+        "applies_to": "table field type (column flags apply to items in columns[])",
+        "example": {
+            "id": "family_members",
+            "type": "table",
+            "label": {"en": "Family Members"},
+            "minRows": 1,
+            "maxRows": 10,
+            "rowKey": "row_id",
+            "rowKeyStrategy": "uuid",
+            "addRowLabel": {"en": "Add Member"},
+            "disableAddRow": True,
+            "disableEditWhen": "is_deleted == 1",
+            "disableDeleteWhen": 'status == "submitted"',
+            "enableListColumns": True,
+            "listColumns": ["member_name", "relation", "status"],
+            "rowValidators": [
+                {
+                    "type": "custom",
+                    "expression": "!(dob && date_of_death) || (dob <= date_of_death)",
+                    "errorMessage": {
+                        "en": "Date of death must be on or after date of birth"
+                    },
+                }
+            ],
+            "tableValidators": [
+                {
+                    "type": "uniqueCombo",
+                    "fields": ["member_name", "relation"],
+                    "errorMessage": {
+                        "en": "This member and relation combination already exists"
+                    },
+                }
+            ],
+            "columns": [
+                {
+                    "id": "member_name",
+                    "type": "text",
+                    "label": {"en": "Name (English)"},
+                    "required": True,
+                    "dynamicId": True,
+                    "transliteration": True,
+                    "transliterationField": "member_name_pa",
+                },
+                {
+                    "id": "member_name_pa",
+                    "type": "text",
+                    "label": {"en": "Name (Punjabi)"},
+                    "required": True,
+                },
+                {
+                    "id": "relation",
+                    "type": "select",
+                    "label": {"en": "Relation"},
+                    "required": True,
+                    "options": [
+                        {"value": "spouse", "label": {"en": "Spouse"}},
+                        {"value": "child", "label": {"en": "Child"}},
+                    ],
+                },
+                {
+                    "id": "status",
+                    "type": "select",
+                    "label": {"en": "Status"},
+                    "showAsTag": True,
+                    "options": [
+                        {"value": "active", "label": {"en": "Active"}},
+                        {"value": "submitted", "label": {"en": "Submitted"}},
+                    ],
+                },
+            ],
+        },
+        "never": [
+            'using "enableTransliteration" on citizen-form tables (the key is "transliteration")',
+            "putting table min/max row limits inside tableValidators (use minRows/maxRows on the field)",
+            'disableEditWhen / disableDeleteWhen as objects or visibleWhen-style maps (they are strings)',
+            'rowValidators[].errorMessage as a plain string (it is LocalizedText with "en")',
+            "showAsTag / dynamicId on the TABLE field (they belong on a COLUMN)",
+            "transliterationField on a column pointing at a form-level field; it must be a sibling column id",
+            "listColumns without enableListColumns: true",
+            "putting static options on the TABLE field (options belong on each COLUMN)",
+            "using datasource/url for a hardcoded list of cities, states, relations, etc. (use options)",
+            "one shared options array for every column (each column has its own options)",
+        ],
+    },
 ]
+
+
+# Canonical table row-key strategies and table-validator types (formBuilder.types.ts).
+ROW_KEY_STRATEGIES: list[str] = ["uuid", "auto", "manual"]
+TABLE_VALIDATOR_TYPES: list[str] = ["uniqueCombo", "minRows", "maxRows", "custom"]
+ROW_VALIDATOR_TYPE: str = "custom"
 
 
 def _field_types_needing_feature_note() -> None:

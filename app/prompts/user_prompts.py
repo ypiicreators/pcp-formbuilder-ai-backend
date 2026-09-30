@@ -153,17 +153,47 @@ SUPPORTED OPERATIONS (use only these):
   {{ "op": "removeOption",   "fieldId": "<select_id>", "optionValue": "<opt_value>" }},
   {{ "op": "addField",       "sectionId": "<section_id>",
      "value": {{ "id": "<new_id>", "type": "<FieldType>", "label": {{ "en": "<text>" }} }} }},
-  {{ "op": "removeField",    "fieldId": "<id>" }}
+  {{ "op": "removeField",    "fieldId": "<id>" }},
+  {{ "op": "addColumn",      "tableId": "<table_id>",
+     "value": {{ "id": "<column_id>", "type": "<TableColumnType>", "label": {{ "en": "<text>" }},
+                "required"?: boolean }} }},
+  {{ "op": "removeColumn",   "tableId": "<table_id>", "fieldId": "<column_id>" }}
 ]
 
 RULES:
 - Every fieldId / tableId / sectionId MUST exist in the COMPACT VIEW below (a new
-  field created by addField is the only exception).
+  field created by addField, or a new column created by addColumn, are the only
+  exceptions).
 - Never change a field's "id" or its "order" (these are protected).
 - Never edit top-level metadata (serviceCode, title, description, category, version).
 - setProp replaces ONE property -- never re-emit a whole field (that drops locales).
 - If a field shows "features" (e.g. visibleWhen, conditionalAutoFillWhen), respect
   those relationships when changing it.
+- For table fields: row actions, keys, and validators are setProp on the TABLE
+  fieldId (disableAddRow, disableEdit, disableDelete, disableEditWhen,
+  disableDeleteWhen, rowKey, rowKeyStrategy, rowValidators, tableValidators,
+  enableListColumns, listColumns, minRows, maxRows). Column flags use
+- Column flags use setColumnProp (showAsTag, dynamicId, transliteration,
+  transliterationField, options, conditionalAutoFillWhen).
+- Static data on table columns: setColumnProp "options" on EACH column (or put
+  "options" inside the addColumn value). If the user says static data / static
+  options on ALL columns, emit options for every select/radio/multiselect
+  column they named; if they listed values for a text column, change its type
+  to select and set options. Never use datasource for a hardcoded list.
+  For a static DEFAULT value (pre-fill), setColumnProp conditionalAutoFillWhen
+  with autoFill.source "static".
+- To ADD columns (city, state, country, a Punjabi pair, etc.) you MUST use
+  addColumn on the table id. NEVER use addField for a table column. NEVER
+  replace the whole "columns" array with setProp (that drops existing config).
+- "Enable transliteration" on a table: do NOT set transliteration on the table
+  field itself. Pick the primary text/English column, addColumn a sibling
+  {{ "id": "<source>_pa", "type": "text", "label": {{ "en": "<Source> (Punjabi)" }} }}
+  if it does not already exist, then setColumnProp transliteration=true and
+  transliterationField="<source>_pa" on the SOURCE column.
+- "Show as tag": setColumnProp showAsTag=true on the intended column (status,
+  type, etc. — if unspecified, the last select/text status-like column).
+- Do not return an empty array when the instruction asks to add, enable, or
+  configure something.
 - Output the JSON array ONLY. No markdown fences, no commentary.
 {target_section}
 COMPACT VIEW OF THE FORM:

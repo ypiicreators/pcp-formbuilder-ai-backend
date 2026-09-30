@@ -16,7 +16,8 @@ What we KEEP (enough to reason and target ids):
   - each field's id, type, and required flag
   - for select/radio/multiselect: the first 1-2 option VALUES as a shape hint
   - PRESENCE markers for conditional/dependency/nested features
-    (visibleWhen, conditionalAutoFillWhen, dependsOn, columns, mobile/otp, ...)
+    (visibleWhen, conditionalAutoFillWhen, dependsOn, columns, mobile/otp,
+    table row-actions/validators, column showAsTag/dynamicId, ...)
     so the model knows the field participates in logic, without the full body
   - table columns compacted the same way (id + type + required)
 
@@ -52,6 +53,14 @@ FEATURE_MARKER_KEYS = (
     "datasource",
     "api_config",
     "mobileNumberField", "otpField",
+    # table-field configuration (presence only -- bodies stay out of compact view)
+    "disableAddRow", "disableEdit", "disableDelete",
+    "disableEditWhen", "disableDeleteWhen",
+    "rowKey", "rowKeyStrategy",
+    "rowValidators", "tableValidators",
+    "enableListColumns", "listColumns",
+    "minRows", "maxRows", "disableMinMaxRows", "conditionalRows",
+    "showAsTag", "dynamicId",
 )
 
 

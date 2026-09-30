@@ -84,6 +84,13 @@ Field = {{
   "disabledWhen"?: object,
   "dependsOn"?: string[],       // MUST reference existing field ids
   "dependsOnAny"?: string[]     // MUST reference existing field ids
+  // table-only (see FEATURE CONTRACT "Table field configuration"):
+  // minRows, maxRows, disableMinMaxRows, conditionalRows,
+  // addRowLabel, removeRowLabel,
+  // disableAddRow, disableEdit, disableDelete,
+  // disableEditWhen, disableDeleteWhen,
+  // rowKey, rowKeyStrategy, rowValidators, tableValidators,
+  // enableListColumns, listColumns
   // include other schema props ONLY when the field genuinely needs them
 }}
 
@@ -106,10 +113,28 @@ NESTED SHAPES (use EXACTLY these when the type calls for them):
   (e.g. "applicant_mobile_number", "applicant_otp").
 
 - table / computed_table / verification carry "columns": TableColumn[]
-    TableColumn = {{ "id": string, "label": LocalizedText, "type": TableColumnType,
-                    "required"?: boolean, "options"?: Option[], "validators"?: Validator[] }}
+    TableColumn = {{
+      "id": string, "label": LocalizedText, "type": TableColumnType,
+      "required"?: boolean, "readonly"?: boolean, "hidden"?: boolean,
+      "placeholder"?: LocalizedText, "options"?: Option[], "validators"?: Validator[],
+      "formula"?: string,
+      "showAsTag"?: boolean,            // tag in the table list; drawer still uses the field
+      "dynamicId"?: boolean,            // append row number to id (activity_name -> activity_name1)
+      "transliteration"?: boolean,      // SAME keys as fields; target is a sibling COLUMN id
+      "transliterationField"?: string,
+      "transliterationWhen"?: object,
+      "trim"?: boolean, "capitalizeFirstWord"?: boolean, "capitalizeAll"?: boolean,
+      "conditionalAutoFillWhen"?: array  // static/default fill: autoFill.source "static"
+    }}
+    select / multiselect / radio columns MUST include a non-empty "options" array
+    when the choices are a fixed list (Static Options). Do NOT set "datasource"
+    for hardcoded lists. Each column has its own options.
     TableColumnType MUST be one of (a DIFFERENT, smaller list than FieldType):
 {table_column_types}
+    A type "table" field ALSO takes the row-action / row-key / validator properties
+    listed on Field above and in the Table field configuration FEATURE CONTRACT.
+    type "verification" uses columns but does NOT use disableAddRow / rowValidators /
+    dynamicId (no repeating-row management).
 
 - api_trigger carries "api_config":
     {{ "endpoint": string, "method"?: "GET"|"POST"|"PUT"|"DELETE", "base_url"?: string }}
@@ -158,10 +183,11 @@ HARD RULES:
 13. FEATURES ARE FLAT PROPERTIES ON AN ORDINARY FIELD -- never a special field
     type. To enable a feature (transliteration, translation, default value,
     conditional auto-fill, visibility, dependencies, concatenation, calculation,
-    age/date-difference), add the EXACT properties from the FEATURE CONTRACTS
-    below to a normal field. Do NOT invent a field type for a feature, and do
-    NOT rename these properties. Every field id referenced by a feature MUST
-    exist in the form.
+    age/date-difference, table row actions / keys / validators / column flags),
+    add the EXACT properties from the FEATURE CONTRACTS below to a normal field
+    (or, for showAsTag / dynamicId / column transliteration, to a TableColumn).
+    Do NOT invent a field type for a feature, and do NOT rename these properties.
+    Every field or column id referenced by a feature MUST exist in the form.
 
 FEATURE CONTRACTS (use these EXACT property names + shapes; copy the examples):
 

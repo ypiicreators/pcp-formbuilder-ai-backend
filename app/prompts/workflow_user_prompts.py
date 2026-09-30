@@ -183,16 +183,21 @@ SUPPORTED OPERATIONS (use only these):
   {{ "op": "removeOption",   "fieldId": "<select_id>", "optionValue": "<opt_value>" }},
   {{ "op": "addField",       "sectionId": "<section_id>",
      "value": {{ "id": "<new_id>", "type": "<FieldType>", "label": {{ "en": "<text>" }} }} }},
-  {{ "op": "removeField",    "fieldId": "<id>" }}
+  {{ "op": "removeField",    "fieldId": "<id>" }},
+  {{ "op": "addColumn",      "tableId": "<table_id>",
+     "value": {{ "id": "<column_id>", "type": "<TableColumnType>", "label": {{ "en": "<text>" }} }} }},
+  {{ "op": "removeColumn",   "tableId": "<table_id>", "fieldId": "<column_id>" }}
 ]
 
 WORKFLOW BUILDER RULES FOR THIS CHANGE-SET:
 - Every fieldId / tableId / sectionId MUST exist in the COMPACT VIEW below
-  (a new field created by addField is the only exception).
+  (a new field created by addField, or a new column created by addColumn, are
+  the only exceptions).
 - Never change a field's "id" or "order".
 - Never add citizen-only types (applying_for, mobile_verification, eKYC types, etc).
 - For transliteration: use "enableTransliteration" (boolean), NOT "transliteration".
 - For table_view columns: use "tableViewColumns", NOT "columns".
+- To add columns on a type "table" field, use addColumn — never addField.
 - Singleton types (activity_timeline, previous_history, role_wise_history) may
   appear AT MOST ONCE — never add a second one.
 - Output the JSON array ONLY. No markdown fences, no commentary.
