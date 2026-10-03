@@ -133,7 +133,7 @@ async def run_document_flow(
 
     # --- Prepare the input (DOCX->text, or native attachment) -------------
     prep_started = time.monotonic()
-    prepared = _prepare_input(file_bytes, filename, content_type)
+    prepared = prepare_document_upload(file_bytes, filename, content_type)
     if prepared.error:
         return GenerateResult(status=GenerateStatus.FAILED, errors=[prepared.error])
     logger.info(
@@ -255,7 +255,7 @@ async def run_document_flow_stream(
     flow_started = time.monotonic()
 
     # --- Prepare input ----------------------------------------------------
-    prepared = _prepare_input(file_bytes, filename, content_type)
+    prepared = prepare_document_upload(file_bytes, filename, content_type)
     if prepared.error:
         yield ("error", [prepared.error])
         return
@@ -356,7 +356,7 @@ async def run_document_flow_stream(
 # --- Internal: normalise the upload -----------------------------------------
 
 
-def _prepare_input(
+def prepare_document_upload(
     file_bytes: bytes, filename: str, content_type: str | None
 ) -> _Prepared:
     """
