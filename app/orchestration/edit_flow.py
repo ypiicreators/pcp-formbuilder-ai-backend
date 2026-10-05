@@ -38,10 +38,10 @@ from app.core.change_set import (
     apply_change_set,
     build_diff,
     diff_to_dicts,
+    list_changed_ids,
     parse_change_set,
 )
 from app.core.context_selector import ContextLevel, select_context, select_context_for_ids
-from app.core.form_index import build_index
 from app.core.change_set import Op  # noqa: F401  (re-exported for typing clarity)
 from app.prompts.system_prompt import get_system_prompt
 from app.prompts.user_prompts import build_edit_prompt, build_repair_prompt
@@ -208,7 +208,7 @@ def _finalize(
     """Build the diff and package a PROPOSAL result."""
     # Recompute changed ids from the applied form vs original (robust even if
     # the step didn't carry them forward).
-    changed = _changed_ids(original, updated)
+    changed = list_changed_ids(original, updated)
     diff = diff_to_dicts(build_diff(original, updated, changed))
     return EditResult(
         status=EditStatus.PROPOSAL,
@@ -217,19 +217,3 @@ def _finalize(
         warnings=warnings,
         context_level=context_level,
     )
-
-
-def _changed_ids(original: dict[str, Any], updated: dict[str, Any]) -> list[str]:
-    """Field ids whose node changed (or was added/removed) between the two."""
-    before = build_index(original)
-    after = build_index(updated)
-    ids: list[str] = []
-    all_ids = before.all_field_ids() | after.all_field_ids()
-    for fid in all_ids:
-        b = before.get_field(fid)
-        a = after.get_field(fid)
-        if (b is None) != (a is None):
-            ids.append(fid)
-        elif b is not None and a is not None and b.node != a.node:
-            ids.append(fid)
-    return ids

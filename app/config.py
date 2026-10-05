@@ -51,16 +51,26 @@ class Settings(BaseSettings):
 
     # --- CORS --------------------------------------------------------------
     # Comma-separated list of allowed origins (mirrors the extractor service).
+    # Origins must NOT include a trailing slash — browsers send Origin without one.
     cors_allow_origins: str = (
         "http://localhost:3000,"
         "http://localhost:5173,"
-        "https://digi.punjab.gov.in"
+        "https://digi.punjab.gov.in,"
+        "https://citizenserv.e-connectsolutions.com"
     )
 
     @property
     def cors_origins_list(self) -> list[str]:
-        """Parse the comma-separated CORS origins into a list."""
-        return [o.strip() for o in self.cors_allow_origins.split(",") if o.strip()]
+        """Parse the comma-separated CORS origins into a list.
+
+        Trailing slashes are stripped so a misconfigured env value like
+        ``https://example.com/`` still matches the browser Origin header.
+        """
+        return [
+            o.strip().rstrip("/")
+            for o in self.cors_allow_origins.split(",")
+            if o.strip()
+        ]
 
 
 @lru_cache

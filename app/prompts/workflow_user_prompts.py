@@ -174,6 +174,8 @@ SUPPORTED OPERATIONS (use only these):
 [
   {{ "op": "setProp",        "fieldId": "<id>", "property": "<name>", "value": <any> }},
   {{ "op": "unsetProp",      "fieldId": "<id>", "property": "<name>" }},
+  {{ "op": "setSectionProp", "sectionId": "<section_id>", "property": "<name>", "value": <any> }},
+  {{ "op": "unsetSectionProp","sectionId": "<section_id>", "property": "<name>" }},
   {{ "op": "setColumnProp",  "tableId": "<table_id>", "fieldId": "<column_id>",
      "property": "<name>", "value": <any> }},
   {{ "op": "unsetColumnProp","tableId": "<table_id>", "fieldId": "<column_id>",
@@ -193,11 +195,22 @@ WORKFLOW BUILDER RULES FOR THIS CHANGE-SET:
 - Every fieldId / tableId / sectionId MUST exist in the COMPACT VIEW below
   (a new field created by addField, or a new column created by addColumn, are
   the only exceptions).
-- Never change a field's "id" or "order".
+- Never invent operation names (no updateColumn / updateField / updateSection).
+- Never change a field's "id" or "order". Never set a section's "fields" array
+  via setSectionProp.
+- Show/hide a SECTION with setSectionProp "visibleWhen" (values MUST be arrays
+  of option values). Show/hide a FIELD with setProp "visibleWhen". Do not use
+  addColumn for visibility.
+- "Enable Default Value" / static default on a FIELD: setProp "autoFillWhen"
+  {{ "field": "form_load", "value": "true",
+     "source": {{ "type": "static", "value": "<default>" }} }}.
+  No "defaultValue" property. Apply once per existing field — do not invent
+  display-only tables or description fields for the values.
 - Never add citizen-only types (applying_for, mobile_verification, eKYC types, etc).
 - For transliteration: use "enableTransliteration" (boolean), NOT "transliteration".
 - For table_view columns: use "tableViewColumns", NOT "columns".
 - To add columns on a type "table" field, use addColumn — never addField.
+  addColumn requires tableId and a column value with id+type.
 - Singleton types (activity_timeline, previous_history, role_wise_history) may
   appear AT MOST ONCE — never add a second one.
 - Output the JSON array ONLY. No markdown fences, no commentary.
@@ -243,6 +256,10 @@ Remember the key workflow-builder rules:
 - table_view uses "tableViewColumns" (not "columns").
 - NEVER use citizen-only types (applying_for, mobile_verification, eKYC types, etc.).
 - Singleton types (activity_timeline, previous_history, role_wise_history): max one each.
+- Allowed change-set ops only: setProp, unsetProp, setSectionProp, unsetSectionProp,
+  setColumnProp, unsetColumnProp, addOption, removeOption, addField, removeField,
+  addColumn, removeColumn. Never invent updateColumn / updateSection.
+- Show/hide a section: setSectionProp visibleWhen; values MUST be arrays.
 
 VALIDATION ERRORS:
 \"\"\"

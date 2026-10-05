@@ -11,8 +11,9 @@ the change. This module:
   3. Produces a before/after diff for the human reviewer (build_diff).
 
 Non-negotiable rules baked in here:
-  - **ID-anchored, never index-based.** Every op names a `fieldId` (and, for
-    columns, a `tableId`). We resolve via form_index; we never touch `sections[3]`.
+  - **ID-anchored, never index-based.** Every op names a `fieldId`, `sectionId`
+    (section props), or `tableId` (columns). We resolve via form_index; we never
+    touch `sections[3]`.
   - **All-or-nothing per request.** We apply to a copy and collect per-op errors.
     If any op fails, the caller keeps the untouched original (plan §9: nothing
     applied on failure).
@@ -41,6 +42,8 @@ class OpType(str, Enum):
 
     SET_PROP = "setProp"           # set/replace a property on a field
     UNSET_PROP = "unsetProp"       # remove a property from a field
+    SET_SECTION_PROP = "setSectionProp"    # set/replace a property on a section
+    UNSET_SECTION_PROP = "unsetSectionProp"  # remove a property from a section
     SET_COLUMN_PROP = "setColumnProp"    # set/replace a property on a table column
     UNSET_COLUMN_PROP = "unsetColumnProp"  # remove a property from a table column
     ADD_OPTION = "addOption"       # append an option to a select/radio field
@@ -60,6 +63,24 @@ PROTECTED_TOP_LEVEL_KEYS = frozenset({
 #: `order` is store-derived; `id` renames would break every reference.
 PROTECTED_FIELD_PROPS = frozenset({"order", "id"})
 
+#: Same protection for sections (id/order are store-derived).
+PROTECTED_SECTION_PROPS = frozenset({"order", "id", "fields", "subSections"})
+
+#: Nested keys omitted from section diffs (fields are diffed separately).
+_SECTION_DIFF_SKIP = frozenset({"fields", "subSections"})
+
+_ALLOWED_OPS = ", ".join(op.value for op in OpType)
+
+#: Common hallucinated aliases → the op the model should have used.
+_UNKNOWN_OP_HINTS = {
+    "updateColumn": "use setColumnProp (tableId + fieldId + property + value)",
+    "updateField": "use setProp (fieldId + property + value)",
+    "updateSection": "use setSectionProp (sectionId + property + value)",
+    "setSection": "use setSectionProp (sectionId + property + value)",
+    "patchColumn": "use setColumnProp",
+    "patchField": "use setProp",
+}
+
 
 @dataclass
 class Op:
@@ -71,7 +92,7 @@ class Op:
     property: str = ""          # for prop ops
     value: Any = None           # for setProp / addOption / addField payloads
     option_value: str = ""      # for removeOption
-    section_id: str = ""        # for addField (which section to add into)
+    section_id: str = ""        # for addField / setSectionProp / unsetSectionProp
     raw: dict[str, Any] = field(default_factory=dict)
 
 
@@ -149,7 +170,7 @@ def parse_change_set(payload: Any) -> ParseResult:
         try:
             op_type = OpType(op_name)
         except ValueError:
-            result.errors.append(f"op[{i}] has unknown op '{op_name}'")
+            result.errors.append(_unknown_op_error(i, op_name))
             continue
 
         parsed, err = _parse_one(op_type, raw, i)
@@ -205,6 +226,19 @@ def _parse_one(op_type: OpType, raw: dict, i: int) -> tuple[Op | None, str]:
         if op_type is OpType.SET_PROP and "value" not in raw:
             return None, f"op[{i}] setProp requires 'value'"
         return Op(type=op_type, field_id=fid, property=prop,
+                  value=raw.get("value"), raw=raw), ""
+
+    if op_type in (OpType.SET_SECTION_PROP, OpType.UNSET_SECTION_PROP):
+        sec = raw.get("sectionId", "")
+        if not sec:
+            return None, f"op[{i}] {op_type.value} requires 'sectionId'"
+        if not prop:
+            return None, f"op[{i}] {op_type.value} requires 'property'"
+        if prop in PROTECTED_SECTION_PROPS:
+            return None, f"op[{i}] cannot modify protected section property '{prop}'"
+        if op_type is OpType.SET_SECTION_PROP and "value" not in raw:
+            return None, f"op[{i}] setSectionProp requires 'value'"
+        return Op(type=op_type, section_id=str(sec), property=prop,
                   value=raw.get("value"), raw=raw), ""
 
     if op_type in (OpType.SET_COLUMN_PROP, OpType.UNSET_COLUMN_PROP):
@@ -350,6 +384,10 @@ def _validate_op_targets(
             return (f"{op.type.value} targets unknown column "
                     f"'{op.table_id}.{op.field_id}'")
 
+    if op.type in (OpType.SET_SECTION_PROP, OpType.UNSET_SECTION_PROP):
+        if not _find_section(form, op.section_id):
+            return f"{op.type.value} targets unknown section '{op.section_id}'"
+
     if op.type is OpType.ADD_FIELD:
         # Section must exist; new id must not collide with an existing one.
         if not _find_section(form, op.section_id):
@@ -382,6 +420,16 @@ def _apply_one(op: Op, form: dict) -> str:
     if op.type is OpType.UNSET_PROP:
         index.get_field(op.field_id).node.pop(op.property, None)
         return op.field_id
+
+    if op.type is OpType.SET_SECTION_PROP:
+        section = _find_section(form, op.section_id)
+        section[op.property] = op.value
+        return op.section_id
+
+    if op.type is OpType.UNSET_SECTION_PROP:
+        section = _find_section(form, op.section_id)
+        section.pop(op.property, None)
+        return op.section_id
 
     if op.type is OpType.SET_COLUMN_PROP:
         index.get_column(op.table_id, op.field_id).node[op.property] = op.value
@@ -435,6 +483,24 @@ def _find_section(form: dict, section_id: str) -> dict | None:
     return None
 
 
+def _section_snapshot(section: dict[str, Any] | None) -> dict[str, Any] | None:
+    """Section metadata only — fields are diffed as their own ids."""
+    if not isinstance(section, dict):
+        return None
+    return {
+        k: copy.deepcopy(v)
+        for k, v in section.items()
+        if k not in _SECTION_DIFF_SKIP
+    }
+
+
+def _unknown_op_error(i: int, op_name: Any) -> str:
+    name = str(op_name) if op_name else ""
+    hint = _UNKNOWN_OP_HINTS.get(name)
+    extra = f"; {hint}" if hint else f". Allowed ops: {_ALLOWED_OPS}"
+    return f"op[{i}] has unknown op '{op_name}'{extra}"
+
+
 def _remove_field_everywhere(form: dict, field_id: str) -> None:
     """Remove a field by id from any section.fields or subSection.fields list."""
     for section in form.get("sections", []):
@@ -471,11 +537,10 @@ def build_diff(
     changed_ids: list[str],
 ) -> list[FieldDiff]:
     """
-    Produce a per-field before/after diff for the reviewer.
+    Produce a per-field (or per-section) before/after diff for the reviewer.
 
-    Uses the two indexes so a changed id is compared by its resolved node,
-    regardless of where it lives. Table ids diff the whole table node (column
-    changes show up inside it).
+    Field ids resolve via the form index. Ids that are sections (and not fields)
+    snapshot section metadata only — nested fields stay out of that snapshot.
     """
     before_index = build_index(original)
     after_index = build_index(updated)
@@ -484,12 +549,59 @@ def build_diff(
     for fid in dict.fromkeys(changed_ids):  # de-dupe, preserve order
         before = before_index.get_field(fid)
         after = after_index.get_field(fid)
-        diffs.append(FieldDiff(
-            field_id=fid,
-            before=copy.deepcopy(before.node) if before else None,
-            after=copy.deepcopy(after.node) if after else None,
-        ))
+        if before is not None or after is not None:
+            diffs.append(FieldDiff(
+                field_id=fid,
+                before=copy.deepcopy(before.node) if before else None,
+                after=copy.deepcopy(after.node) if after else None,
+            ))
+            continue
+        bsec = _find_section(original, fid)
+        asec = _find_section(updated, fid)
+        if bsec is not None or asec is not None:
+            diffs.append(FieldDiff(
+                field_id=fid,
+                before=_section_snapshot(bsec),
+                after=_section_snapshot(asec),
+            ))
     return diffs
+
+
+def list_changed_ids(
+    original: dict[str, Any], updated: dict[str, Any]
+) -> list[str]:
+    """
+    Field ids whose node changed, plus section ids whose metadata changed
+    (visibleWhen, title, etc. — not nested fields).
+    """
+    before = build_index(original)
+    after = build_index(updated)
+    ids: list[str] = []
+    all_ids = before.all_field_ids() | after.all_field_ids()
+    for fid in all_ids:
+        b = before.get_field(fid)
+        a = after.get_field(fid)
+        if (b is None) != (a is None):
+            ids.append(fid)
+        elif b is not None and a is not None and b.node != a.node:
+            ids.append(fid)
+
+    before_sections = {
+        str(s.get("id")): s
+        for s in original.get("sections") or []
+        if isinstance(s, dict) and s.get("id")
+    }
+    after_sections = {
+        str(s.get("id")): s
+        for s in updated.get("sections") or []
+        if isinstance(s, dict) and s.get("id")
+    }
+    for sid in list(dict.fromkeys([*before_sections, *after_sections])):
+        if _section_snapshot(before_sections.get(sid)) != _section_snapshot(
+            after_sections.get(sid)
+        ):
+            ids.append(sid)
+    return ids
 
 
 def diff_to_dicts(diffs: list[FieldDiff]) -> list[dict[str, Any]]:

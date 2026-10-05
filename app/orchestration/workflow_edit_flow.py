@@ -42,6 +42,7 @@ from app.core.change_set import (
     apply_change_set,
     build_diff,
     diff_to_dicts,
+    list_changed_ids,
     parse_change_set,
 )
 from app.core.context_selector import (
@@ -49,7 +50,6 @@ from app.core.context_selector import (
     select_context,
     select_context_for_ids,
 )
-from app.core.form_index import build_index
 from app.prompts.workflow_system_prompt import get_workflow_system_prompt
 from app.prompts.workflow_user_prompts import (
     build_workflow_edit_prompt,
@@ -295,7 +295,7 @@ def _finalize_workflow(
     was_flat: bool,
 ) -> WorkflowEditResult:
     """Build the diff, denormalize the result, and package a PROPOSAL."""
-    changed = _changed_ids(original, updated)
+    changed = list_changed_ids(original, updated)
     diff = diff_to_dicts(build_diff(original, updated, changed))
 
     # Denormalize back to the original shape (flat array or sections object).
@@ -309,21 +309,3 @@ def _finalize_workflow(
         context_level=context_level,
         was_flat=was_flat,
     )
-
-
-def _changed_ids(
-    original: dict[str, Any], updated: dict[str, Any]
-) -> list[str]:
-    """Field ids whose node changed (or was added/removed) between the two forms."""
-    before = build_index(original)
-    after = build_index(updated)
-    ids: list[str] = []
-    all_ids = before.all_field_ids() | after.all_field_ids()
-    for fid in all_ids:
-        b = before.get_field(fid)
-        a = after.get_field(fid)
-        if (b is None) != (a is None):
-            ids.append(fid)
-        elif b is not None and a is not None and b.node != a.node:
-            ids.append(fid)
-    return ids

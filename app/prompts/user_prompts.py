@@ -144,6 +144,8 @@ SUPPORTED OPERATIONS (use only these):
 [
   {{ "op": "setProp",        "fieldId": "<id>", "property": "<name>", "value": <any> }},
   {{ "op": "unsetProp",      "fieldId": "<id>", "property": "<name>" }},
+  {{ "op": "setSectionProp", "sectionId": "<section_id>", "property": "<name>", "value": <any> }},
+  {{ "op": "unsetSectionProp","sectionId": "<section_id>", "property": "<name>" }},
   {{ "op": "setColumnProp",  "tableId": "<table_id>", "fieldId": "<column_id>",
      "property": "<name>", "value": <any> }},
   {{ "op": "unsetColumnProp","tableId": "<table_id>", "fieldId": "<column_id>",
@@ -164,15 +166,38 @@ RULES:
 - Every fieldId / tableId / sectionId MUST exist in the COMPACT VIEW below (a new
   field created by addField, or a new column created by addColumn, are the only
   exceptions).
-- Never change a field's "id" or its "order" (these are protected).
+- Never invent operation names. There is no updateColumn / updateField /
+  updateSection. To change a property, use setProp (field), setSectionProp
+  (section), or setColumnProp (table column).
+- Never change a field's "id" or its "order" (these are protected). Never
+  replace a section's "fields" / "subSections" arrays with setSectionProp.
 - Never edit top-level metadata (serviceCode, title, description, category, version).
-- setProp replaces ONE property -- never re-emit a whole field (that drops locales).
+- setProp / setSectionProp replace ONE property -- never re-emit a whole field
+  or section (that drops locales).
+- Show/hide a SECTION when a radio/select has a value: setSectionProp
+  "visibleWhen" on that sectionId. Values MUST be arrays of option values from
+  the compact view. "Any option selected" means list EVERY option value of the
+  watched field. Example:
+  {{ "op": "setSectionProp", "sectionId": "property_detail",
+     "property": "visibleWhen",
+     "value": {{ "search_method": ["PROPERTY_ID", "SCHEME_NAME"] }} }}
+- Show/hide a FIELD the same way with setProp "visibleWhen" on the fieldId.
+  Do NOT use addColumn / addField for visibility.
+- "Enable Default Value" / static default / pre-fill on form load for a FIELD:
+  setProp "autoFillWhen" on that fieldId. There is NO "defaultValue" property.
+  Shape (matches the Form Builder "Enable Default Value" checkbox):
+  {{ "op": "setProp", "fieldId": "scheme_name", "property": "autoFillWhen",
+     "value": {{ "field": "form_load", "value": "true",
+                 "source": {{ "type": "static", "value": "test schme 8" }} }} }}
+  Do this once per field. Do NOT invent a summary table, description block, or
+  new fields to "show" the values — put autoFillWhen on the existing fields.
+  Optional: also setProp "readonly": true if the user asked to lock the value.
 - If a field shows "features" (e.g. visibleWhen, conditionalAutoFillWhen), respect
   those relationships when changing it.
 - For table fields: row actions, keys, and validators are setProp on the TABLE
   fieldId (disableAddRow, disableEdit, disableDelete, disableEditWhen,
   disableDeleteWhen, rowKey, rowKeyStrategy, rowValidators, tableValidators,
-  enableListColumns, listColumns, minRows, maxRows). Column flags use
+  enableListColumns, listColumns, minRows, maxRows).
 - Column flags use setColumnProp (showAsTag, dynamicId, transliteration,
   transliterationField, options, conditionalAutoFillWhen).
 - Static data on table columns: setColumnProp "options" on EACH column (or put
@@ -185,6 +210,8 @@ RULES:
 - To ADD columns (city, state, country, a Punjabi pair, etc.) you MUST use
   addColumn on the table id. NEVER use addField for a table column. NEVER
   replace the whole "columns" array with setProp (that drops existing config).
+  addColumn requires "tableId" AND a column "value" object with id+type.
+  Do not emit addColumn unless the instruction asks to add a table column.
 - "Enable transliteration" on a table: do NOT set transliteration on the table
   field itself. Pick the primary text/English column, addColumn a sibling
   {{ "id": "<source>_pa", "type": "text", "label": {{ "en": "<Source> (Punjabi)" }} }}
@@ -226,6 +253,21 @@ Your previous output failed validation. Fix ONLY the listed problems and return
 the corrected result in the same format you produced before: {output_format}. Do
 not introduce new fields, do not re-emit untouched fields wholesale, and do not
 change anything unrelated to these errors. Output JSON only, no markdown fences.
+
+CHANGE-SET REPAIR HINTS (edit mode):
+- Allowed ops only: setProp, unsetProp, setSectionProp, unsetSectionProp,
+  setColumnProp, unsetColumnProp, addOption, removeOption, addField,
+  removeField, addColumn, removeColumn. Never invent names like updateColumn.
+- Show/hide a section: setSectionProp visibleWhen on sectionId. Values MUST be
+  arrays of option values, e.g. {{ "search_method": ["PROPERTY_ID", "SCHEME_NAME"] }}.
+- Enable Default Value / static pre-fill on a field: setProp autoFillWhen with
+  {{ "field": "form_load", "value": "true",
+     "source": {{ "type": "static", "value": "<the default>" }} }}.
+  Never use a top-level "defaultValue" key.
+- addColumn requires tableId and a column value with id+type. Do not use
+  addColumn unless adding a table column.
+- updateColumn is invalid; use setColumnProp. updateSection is invalid; use
+  setSectionProp.
 
 VALIDATION ERRORS:
 \"\"\"
