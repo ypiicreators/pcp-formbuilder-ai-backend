@@ -724,7 +724,7 @@ def _loads_json(text: str) -> dict[str, Any] | None:
     return None
 
 
-def _user_prompt(req: GraphAgentMessageRequest) -> str:
+def graph_context_prompt(req: GraphAgentMessageRequest) -> str:
     nodes = [
         {
             "stepId": n.step_id,
@@ -752,12 +752,26 @@ def _user_prompt(req: GraphAgentMessageRequest) -> str:
         }
         for e in req.graph.edges
     ]
+    catalog_lines = []
+    if req.catalogs.phases:
+        catalog_lines.append("- Phases: " + ", ".join(f'"{p.label}"' for p in req.catalogs.phases[:40]))
+    if req.catalogs.statuses:
+        catalog_lines.append("- Statuses: " + ", ".join(f'"{s.label}"' for s in req.catalogs.statuses[:60]))
+    if req.catalogs.actions:
+        catalog_lines.append("- Actions: " + ", ".join(f'"{a.label}"' for a in req.catalogs.actions[:60]))
+    if req.catalogs.roles:
+        catalog_lines.append("- Roles: " + ", ".join(f'"{r.label}"' for r in req.catalogs.roles[:80]))
+    catalogs_text = ""
+    if catalog_lines:
+        catalogs_text = "Master Catalogs in Portal (prefer these exact names for action_name, role_name, phase_name, officer_status_name):\n" + "\n".join(catalog_lines) + "\n\n"
+
     return (
         f"WorkflowId: {req.workflow_id}\n"
         f"WorkflowTypeId: {req.workflow_type_id}\n"
         f"DepartmentId: {req.department_id}\n"
-        f"Existing cards: {json.dumps(nodes)}\n"
-        f"Existing connections: {json.dumps(edges)}\n"
+        f"Existing cards on canvas: {json.dumps(nodes)}\n"
+        f"Existing connections on canvas: {json.dumps(edges)}\n\n"
+        f"{catalogs_text}"
         f"User request:\n{req.text}\n"
     )
 
@@ -767,7 +781,7 @@ async def parse_message(req: GraphAgentMessageRequest) -> WorkflowSpec:
         from app.providers.factory import get_provider
 
         provider = get_provider()
-        raw = await provider.generate(GRAPH_AGENT_SYSTEM_PROMPT, _user_prompt(req))
+        raw = await provider.generate(GRAPH_AGENT_SYSTEM_PROMPT, graph_context_prompt(req))
         data = _loads_json(raw)
         if data:
             spec = spec_from_llm_json(data, req.graph.nodes)

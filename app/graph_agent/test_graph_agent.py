@@ -698,6 +698,31 @@ def test_vague_remove_action_asks_which_edge():
     assert ops[0].payload["stepActionId"] == 44
 
 
+def test_prepare_document_upload_rejects_empty():
+    from app.orchestration.document_flow import prepare_document_upload
 
+    prep = prepare_document_upload(b"", "spec.pdf", "application/pdf")
+    assert prep.error
+
+
+def test_document_spec_from_llm_json():
+    data = {
+        "create_steps": [
+            {"key": "step:submitted", "name": "Submitted", "sla_hours": 24},
+            {"key": "step:approved", "name": "Approved", "is_final": True},
+        ],
+        "create_transitions": [
+            {
+                "from_ref": "Submitted",
+                "to_ref": "Approved",
+                "action_name": "Approve",
+                "roles": [{"role_name": "Dealing Clerk", "sla_hours": 48}],
+            }
+        ],
+    }
+    spec = spec_from_llm_json(data, [])
+    assert len(spec.steps) == 2
+    assert len(spec.transitions) == 1
+    assert spec.transitions[0].action_name == "Approve"
 
 

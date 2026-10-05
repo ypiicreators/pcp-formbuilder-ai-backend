@@ -22,6 +22,7 @@ _SESSIONS: dict[str, dict[str, Any]] = {}
 class AgentState(TypedDict, total=False):
     req: GraphAgentMessageRequest
     session_id: str
+    initial_spec: WorkflowSpec
     spec: WorkflowSpec
     questions: list
     plan: list
@@ -52,7 +53,10 @@ async def node_parse(state: AgentState) -> dict:
             for e in stored_spec.transitions
         )
     )
-    if (req.answers or waiting_for_form) and stored_spec:
+    initial = state.get("initial_spec")
+    if initial is not None:
+        spec = initial
+    elif (req.answers or waiting_for_form) and stored_spec:
         spec = stored_spec
     else:
         spec = await parse_message(req)
@@ -143,7 +147,11 @@ def build_graph():
 _GRAPH = build_graph()
 
 
-async def run_graph_agent(req: GraphAgentMessageRequest) -> GraphAgentMessageResponse:
+async def run_graph_agent(
+    req: GraphAgentMessageRequest,
+    *,
+    initial_spec: WorkflowSpec | None = None,
+) -> GraphAgentMessageResponse:
     sid = _session(req.session_id)
     if req.workflow_id <= 0:
         return GraphAgentMessageResponse(
@@ -151,7 +159,10 @@ async def run_graph_agent(req: GraphAgentMessageRequest) -> GraphAgentMessageRes
             session_id=sid,
             message="Save the workflow definition first, then use the AI agent to add cards.",
         )
-    result = await _GRAPH.ainvoke({"req": req, "session_id": sid})
+    invoke: AgentState = {"req": req, "session_id": sid}
+    if initial_spec is not None:
+        invoke["initial_spec"] = initial_spec
+    result = await _GRAPH.ainvoke(invoke)
     return GraphAgentMessageResponse(
         status=result.get("status") or "error",
         session_id=sid,

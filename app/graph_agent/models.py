@@ -156,7 +156,7 @@ class GraphSnapshot(BaseModel):
 class GraphAgentMessageRequest(BaseModel):
     session_id: str | None = Field(default=None, alias="sessionId")
     workflow_id: int = Field(alias="workflowId")
-    text: str = Field(min_length=1)
+    text: str = Field(default="")
     workflow_type_id: int | None = Field(default=None, alias="workflowTypeId")
     department_id: int | None = Field(default=None, alias="departmentId")
     graph: GraphSnapshot = Field(default_factory=GraphSnapshot)
@@ -178,6 +178,8 @@ class Question(BaseModel):
     prompt: str
     options: list[QuestionOption] = Field(default_factory=list)
     group_title: str | None = Field(default=None, alias="groupTitle")
+    default_id: int | None = Field(default=None, alias="defaultId")
+    default_value: Any | None = Field(default=None, alias="defaultValue")
 
     model_config = ConfigDict(populate_by_name=True, serialize_by_alias=True)
 

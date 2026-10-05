@@ -179,13 +179,18 @@ def build_plan(spec: WorkflowSpec, req: GraphAgentMessageRequest) -> list[PlanOp
                     f"({edge.action_name or 'action'}; "
                     f"roles: {', '.join(role_bits)})"
                 ),
-                from_ref=str(edge.from_step_id) if edge.from_step_id else edge.from_ref,
+                from_ref=edge.from_temp_key or (
+                    str(edge.from_step_id) if edge.from_step_id else edge.from_ref
+                ),
                 to_ref=edge.to_temp_key or (
                     str(edge.to_step_id) if edge.to_step_id else edge.to_ref
                 ),
                 payload={
                     "workflow": {"workflowId": req.workflow_id},
-                    "currentStep": {"stepId": edge.from_step_id},
+                    "currentStep": {
+                        "stepId": edge.from_step_id,
+                        "tempKey": edge.from_temp_key,
+                    },
                     "nextStep": {
                         "stepId": edge.to_step_id,
                         "tempKey": edge.to_temp_key,

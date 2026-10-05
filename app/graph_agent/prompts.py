@@ -86,3 +86,67 @@ RULES:
 - select/radio/multiselect need options: [{ "value": "option_1", "label": {"en": "Option 1", "pa": ""} }].
 - If the user pastes form-builder JSON on update_form, put it on form_fields of the targeted existing role. Do not replace other roles' schemas.
 """
+
+GRAPH_AGENT_DOCUMENT_SUPPLEMENT = """
+DOCUMENT / FRS / WORKFLOW DIAGRAM MODE:
+The user attached a Functional Requirements Specification (FRS), workflow document, standard operating procedure (SOP), or flow diagram.
+Your task is to accurately extract the COMPLETE officer approval workflow graph.
+
+1. LOCATE AND INTERPRET THE WORKFLOW:
+- In FRS documents, locate the "Workflow Diagram" or "Process Flow Diagram" (often Section 7 / Section 6) and "Stakeholders & Responsibilities" (Section 3.2).
+- Swimlane Diagrams:
+  * Each SWIMLANE (row or column) represents a designated ACTOR / ROLE (e.g., Dealing Clerk, Patwari, Tehsildar / Naib Tehsildar, Sewa Kendra Operator, Citizen/Applicant).
+  * The boxes inside each swimlane represent either the STATUS/STAGE of the application or the task performed by that role.
+  * Arrows represent TRANSITIONS between status cards, caused by an ACTION taken by that swimlane's role.
+  * Decision diamonds (e.g. "Is application ok?", "Is clarification needed / Approve / Reject?") represent branching transitions.
+
+2. STATUS CARDS (STEPS) TO CREATE:
+- Identify distinct lifecycle statuses:
+  a. Initial Review Step: The starting officer review stage (e.g. "Assigned for application verification" or "Under Scrutiny by Dealing Clerk").
+     NOTE: If the canvas ALREADY has an initial card (e.g. "Assigned for application verification"), REUSE IT as the starting step! Do NOT create a duplicate initial step!
+  b. Verification Step: Physical or field verification stage if required by the document (e.g. "Sent for Field Verification" / "Under Field Verification by Patwari").
+  c. Approval Step: Final decision review stage (e.g. "Pending Approval with Tehsildar/Naib Tehsildar").
+  d. Positive Terminal Step: When approved and certificate/service is generated (e.g. "Certificate Issued" / "Approved"). Set is_final: true.
+  e. Negative Terminal Step: When rejected (e.g. "Application Rejected" / "Rejected"). Set is_final: true.
+  f. Query / Deficiency Step: When sent back to citizen or operator for correction (e.g. "Sent Back for Clarification" / "Deficiency Raised").
+- For each step, provide:
+  * name: clear, descriptive status name
+  * phase_name: the logical phase (e.g. "Scrutiny", "Field Verification", "Approval", "Delivery")
+  * officer_status_name: appropriate officer status (e.g. "Under Scrutiny", "Under Field Verification", "Pending Approval", "Approved", "Rejected")
+  * citizen_status_name: citizen-facing status (e.g. "Under Processing", "Under Field Verification", "Pending Approval", "Completed", "Rejected")
+  * sla_hours: standard turnaround time for this step in hours (e.g. 24, 48, 72)
+  * description: 1-2 sentence description of what happens at this step
+  * is_final: true ONLY for terminal steps (Certificate Issued, Rejected), false/null for others.
+  * is_initial: true for the starting card if graph is empty.
+
+3. CONNECTIONS (TRANSITIONS) TO CREATE:
+- Follow the directional flow arrows strictly from source status to target status.
+- EVERY connection MUST specify:
+  * from_ref: exact name or key of source status card
+  * to_ref: exact name or key of target status card
+  * action_name: descriptive action label from the diagram (e.g. "Forward for Field Verification", "Forward to Approving Authority", "Forward with Verification Report", "Approve & Generate Certificate", "Reject", "Send Back for Clarification", "Resubmit Application")
+  * roles: the EXACT officer role(s) authorized to perform this transition according to the document swimlane!
+    - ONLY use roles explicitly stated in the document (e.g. "Dealing Clerk", "Patwari", "Tehsildar", "Naib Tehsildar", "Sewa Kendra Operator", "Applicant").
+    - NEVER invent or assign unrelated roles like "ADC", "Additional Chief Secretary", "District Magistrate" unless the document explicitly names them for that step!
+    - For each role, provide:
+      role_name: officer role name
+      sla_hours: SLA for this role to act (in hours, e.g. 24)
+
+4. STANDARD SEQUENCE FOR CITIZEN SERVICES:
+- Initial Review (Dealing Clerk) verifies application:
+  -> Forward for Field Verification (Action: Forward for Field Verification, Role: Dealing Clerk) -> Target: Sent for Field Verification
+  -> Forward to Approver with deficiency/remarks (Action: Forward to Approving Authority, Role: Dealing Clerk) -> Target: Pending Approval with Tehsildar
+- Verifier (Patwari) conducts physical verification:
+  -> Forward with Report (Action: Forward with Verification Report, Role: Patwari) -> Target: Pending Approval with Tehsildar
+- Approver (Tehsildar / Naib Tehsildar) reviews:
+  -> Approve (Action: Approve & Generate Certificate, Role: Tehsildar, Naib Tehsildar) -> Target: Certificate Issued
+  -> Reject (Action: Reject, Role: Tehsildar, Naib Tehsildar) -> Target: Application Rejected
+  -> Send Back (Action: Send Back for Clarification, Role: Tehsildar, Naib Tehsildar) -> Target: Sent Back for Clarification
+- Citizen / Sewa Kendra resubmits:
+  -> Resubmit (Action: Resubmit Application, Role: Sewa Kendra Operator, Applicant) -> Target: Assigned for application verification
+
+5. CRITICAL OUTPUT FORMAT:
+- You must output ONLY a valid JSON object starting with { and ending with }.
+- NEVER write conversational text, markdown explanations, preambles, or postscripts.
+- All property names and string values must use double quotes.
+"""

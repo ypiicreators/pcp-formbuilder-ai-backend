@@ -26,6 +26,13 @@ class StepDraft(BaseModel):
     citizen_status_id: int | None = None
     step_type_id: int | None = None
     delete: bool = False
+    phase_confirmed: bool = False
+    officer_status_confirmed: bool = False
+    citizen_status_confirmed: bool = False
+    sla_confirmed: bool = False
+    description_confirmed: bool = False
+    is_final_confirmed: bool = False
+    step_type_confirmed: bool = False
 
 
 class RoleDraft(BaseModel):
@@ -38,6 +45,8 @@ class RoleDraft(BaseModel):
     action_ui_schema: str | None = None
     action_function_schema: str | None = None
     is_form_editable: int = 0
+    role_confirmed: bool = False
+    sla_confirmed: bool = False
 
 
 class TransitionDraft(BaseModel):
@@ -50,6 +59,7 @@ class TransitionDraft(BaseModel):
     department_id: int | None = None
     from_step_id: int | None = None
     to_step_id: int | None = None
+    from_temp_key: str | None = None
     to_temp_key: str | None = None
     action_type_id: int | None = None
     is_instant: bool = False
@@ -65,6 +75,8 @@ class TransitionDraft(BaseModel):
     delete_transition: bool = False
     step_action_id: int | None = None
     roles: list[RoleDraft] = Field(default_factory=list)
+    action_confirmed: bool = False
+    department_confirmed: bool = False
 
 
 class WorkflowSpec(BaseModel):

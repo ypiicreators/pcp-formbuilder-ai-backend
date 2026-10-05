@@ -21,8 +21,25 @@ def _score(query: str, label: str) -> float:
         return 0.0
     if q == l:
         return 1.0
-    if q in l or l in q:
-        return 0.92
+    q_words = set(q.split())
+    l_words = set(l.split())
+    if q_words == l_words:
+        return 1.0
+    # Exact phrase containment with word boundaries
+    if f" {q} " in f" {l} ":
+        ratio = len(q) / len(l)
+        return min(0.96, 0.85 + 0.15 * ratio)
+    if f" {l} " in f" {q} ":
+        ratio = len(l) / len(q)
+        return min(0.96, 0.85 + 0.15 * ratio)
+    # Token overlap
+    common = q_words.intersection(l_words)
+    if common:
+        overlap_ratio = len(common) / max(len(q_words), len(l_words))
+        if overlap_ratio >= 0.8:
+            return 0.90
+        if overlap_ratio >= 0.5:
+            return 0.75
     return SequenceMatcher(None, q, l).ratio()
 
 
@@ -66,7 +83,10 @@ def question_from_match(
     prompt: str,
     match: MatchResult,
     group_title: str | None = None,
+    default_id: int | None = None,
+    default_value: Any | None = None,
 ) -> Question:
+    best_id = default_id if default_id is not None else (match.item.id if match.item else None)
     return Question(
         key=key,
         field=field,
@@ -74,4 +94,6 @@ def question_from_match(
         prompt=prompt,
         options=[QuestionOption(id=i.id, label=i.label) for i in match.options],
         group_title=group_title,
+        default_id=best_id,
+        default_value=default_value,
     )

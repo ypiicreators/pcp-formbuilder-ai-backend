@@ -10,7 +10,7 @@ from app.graph_agent.models import (
     Question,
     QuestionOption,
 )
-from app.graph_agent.resolve import match_catalog, match_node, question_from_match
+from app.graph_agent.resolve import _score, match_catalog, match_node, question_from_match
 from app.graph_agent.spec import RoleDraft, TransitionDraft, WorkflowSpec
 
 
@@ -36,13 +36,26 @@ def _node_name(step_id: int | None, nodes) -> str | None:
 
 def _connection_title(edge: TransitionDraft, spec: WorkflowSpec, nodes) -> str:
     step_by_key = {s.key: s for s in spec.steps}
-    from_name = _node_name(edge.from_step_id, nodes) or edge.from_ref or "Source card"
+    from_name = None
+    if edge.from_temp_key and edge.from_temp_key in step_by_key:
+        from_name = step_by_key[edge.from_temp_key].name
+    if not from_name:
+        from_name = _node_name(edge.from_step_id, nodes) or edge.from_ref or "Source card"
     to_name = None
     if edge.to_temp_key and edge.to_temp_key in step_by_key:
         to_name = step_by_key[edge.to_temp_key].name
     if not to_name:
         to_name = _node_name(edge.to_step_id, nodes) or edge.to_ref or "Target card"
     return f"{from_name}  →  {to_name}"
+
+
+def _int_val(val: Any) -> int | None:
+    if val is None:
+        return None
+    try:
+        return int(val)
+    except (ValueError, TypeError):
+        return None
 
 
 def apply_answers(
@@ -57,32 +70,39 @@ def apply_answers(
     by_id_action = {i.id: i for i in catalogs.actions}
     by_id_role = {i.id: i for i in catalogs.roles}
     by_id_dept = {i.id: i for i in catalogs.departments}
+    texts = text_answers or {}
 
     for step in spec.steps:
         pid = answers.get(f"{step.key}:phase")
         if pid:
             step.phase_id = pid
+            step.phase_confirmed = True
             if pid in by_id_phase:
                 step.phase_name = by_id_phase[pid].label
         oid = answers.get(f"{step.key}:officer_status")
         if oid:
             step.officer_status_id = oid
+            step.officer_status_confirmed = True
             if oid in by_id_status:
                 step.officer_status_name = by_id_status[oid].label
         cid = answers.get(f"{step.key}:citizen_status")
         if cid:
             step.citizen_status_id = cid
+            step.citizen_status_confirmed = True
             if cid in by_id_status:
                 step.citizen_status_name = by_id_status[cid].label
-        sla = answers.get(f"{step.key}:sla_hours")
+        sla = _int_val(answers.get(f"{step.key}:sla_hours")) if f"{step.key}:sla_hours" in answers else _int_val(texts.get(f"{step.key}:sla_hours"))
         if sla is not None:
             step.sla_hours = sla
+            step.sla_confirmed = True
         final_flag = answers.get(f"{step.key}:is_final")
         if final_flag is not None:
             step.is_final = bool(final_flag)
+            step.is_final_confirmed = True
         stid = answers.get(f"{step.key}:step_type")
         if stid:
             step.step_type_id = stid
+            step.step_type_confirmed = True
             for item in catalogs.step_types:
                 if item.id == stid:
                     step.step_type_name = item.label
@@ -91,18 +111,19 @@ def apply_answers(
         if sid:
             step.existing_step_id = sid
             step.update = True
-        texts = text_answers or {}
         name_text = texts.get(f"{step.key}:name")
         if name_text and str(name_text).strip():
             step.name = str(name_text).strip()
         desc = texts.get(f"{step.key}:description")
         if desc and str(desc).strip():
             step.description = str(desc).strip()
+            step.description_confirmed = True
 
     for edge in spec.transitions:
         aid = answers.get(f"{edge.key}:action")
         if aid and aid in by_id_action:
             edge.action_id = aid
+            edge.action_confirmed = True
             item = by_id_action[aid]
             edge.action_name = item.label
             extra = item.extra or {}
@@ -111,13 +132,26 @@ def apply_answers(
         did = answers.get(f"{edge.key}:department")
         if did and did in by_id_dept:
             edge.department_id = did
+            edge.department_confirmed = True
             edge.department_name = by_id_dept[did].label
         fid = answers.get(f"{edge.key}:from")
         if fid:
             edge.from_step_id = fid
+        elif f"{edge.key}:from" in texts:
+            val = texts[f"{edge.key}:from"].strip()
+            if val in step_by_key:
+                edge.from_temp_key = val
+            elif val.lower() in step_by_name:
+                edge.from_temp_key = step_by_name[val.lower()].key
         tid = answers.get(f"{edge.key}:to")
         if tid:
             edge.to_step_id = tid
+        elif f"{edge.key}:to" in texts:
+            val = texts[f"{edge.key}:to"].strip()
+            if val in step_by_key:
+                edge.to_temp_key = val
+            elif val.lower() in step_by_name:
+                edge.to_temp_key = step_by_name[val.lower()].key
         edge_idx = answers.get(f"{edge.key}:existing_edge")
         if edge_idx is not None and graph and 0 <= edge_idx < len(graph.edges):
             ge = graph.edges[edge_idx]
@@ -145,20 +179,24 @@ def apply_answers(
                     else:
                         edge.roles[i] = role
                 role.role_id = rid
+                role.role_confirmed = True
                 item = by_id_role[rid]
                 role.role_name = item.label
                 extra = item.extra or {}
                 role.role_meta = extra.get("roleMeta")
-            sla = answers.get(f"{edge.key}:role:{i}:sla")
+            sla = _int_val(answers.get(f"{edge.key}:role:{i}:sla")) if f"{edge.key}:role:{i}:sla" in answers else _int_val(texts.get(f"{edge.key}:role:{i}:sla"))
             if sla is not None and role is not None:
                 role.sla_hours = sla
+                role.sla_confirmed = True
         target = answers.get(f"{edge.key}:existing_role")
         if target:
             edge.target_role_id = target
-        sla_upd = answers.get(f"{edge.key}:role:0:sla")
+        sla_upd = _int_val(answers.get(f"{edge.key}:role:0:sla")) if f"{edge.key}:role:0:sla" in answers else _int_val(texts.get(f"{edge.key}:role:0:sla"))
         if sla_upd is not None:
             edge.update_sla_hours = sla_upd
-        texts = text_answers or {}
+            if edge.roles:
+                edge.roles[0].sla_hours = sla_upd
+                edge.roles[0].sla_confirmed = True
         blob = texts.get(f"{edge.key}:form_fields")
         if blob:
             schema = schema_from_user_spec(blob)
@@ -445,54 +483,52 @@ def resolve_spec(spec: WorkflowSpec, req: GraphAgentMessageRequest) -> list[Ques
             )
 
         phase = match_catalog(step.phase_name, catalogs.phases)
-        if step.phase_id is None:
-            if phase.unique and phase.item:
-                step.phase_id = phase.item.id
-            else:
-                questions.append(
-                    question_from_match(
-                        f"{step.key}:phase",
-                        "phase",
-                        step.key,
-                        "Phase",
-                        phase,
-                        group_title=group,
-                    )
+        if step.phase_id is None or (is_new and not step.phase_confirmed):
+            default_pid = step.phase_id if step.phase_id else (phase.item.id if phase.item else None)
+            questions.append(
+                question_from_match(
+                    f"{step.key}:phase",
+                    "phase",
+                    step.key,
+                    "Phase",
+                    phase,
+                    group_title=group,
+                    default_id=default_pid,
                 )
+            )
 
         officer = match_catalog(step.officer_status_name, catalogs.statuses)
-        if step.officer_status_id is None:
-            if officer.unique and officer.item:
-                step.officer_status_id = officer.item.id
-            else:
-                questions.append(
-                    question_from_match(
-                        f"{step.key}:officer_status",
-                        "officer_status",
-                        step.key,
-                        "Officer status",
-                        officer,
-                        group_title=group,
-                    )
+        if step.officer_status_id is None or (is_new and not step.officer_status_confirmed):
+            default_oid = step.officer_status_id if step.officer_status_id else (officer.item.id if officer.item else None)
+            questions.append(
+                question_from_match(
+                    f"{step.key}:officer_status",
+                    "officer_status",
+                    step.key,
+                    "Officer status",
+                    officer,
+                    group_title=group,
+                    default_id=default_oid,
                 )
+            )
 
         citizen = match_catalog(step.citizen_status_name, catalogs.statuses)
-        if step.citizen_status_id is None:
-            if citizen.unique and citizen.item:
-                step.citizen_status_id = citizen.item.id
-            else:
-                questions.append(
-                    question_from_match(
-                        f"{step.key}:citizen_status",
-                        "citizen_status",
-                        step.key,
-                        "Citizen status",
-                        citizen,
-                        group_title=group,
-                    )
+        if step.citizen_status_id is None or (is_new and not step.citizen_status_confirmed):
+            default_cid = step.citizen_status_id if step.citizen_status_id else (citizen.item.id if citizen.item else None)
+            questions.append(
+                question_from_match(
+                    f"{step.key}:citizen_status",
+                    "citizen_status",
+                    step.key,
+                    "Citizen status",
+                    citizen,
+                    group_title=group,
+                    default_id=default_cid,
                 )
+            )
 
-        if step.sla_hours is None or step.sla_hours < 0:
+        if step.sla_hours is None or step.sla_hours <= 0 or (is_new and not step.sla_confirmed):
+            suggested_sla = step.sla_hours if (step.sla_hours is not None and step.sla_hours > 0) else None
             questions.append(
                 Question(
                     key=f"{step.key}:sla_hours",
@@ -501,10 +537,12 @@ def resolve_spec(spec: WorkflowSpec, req: GraphAgentMessageRequest) -> list[Ques
                     prompt="SLA hours",
                     options=[],
                     group_title=group,
+                    default_value=suggested_sla,
                 )
             )
 
-        if not (step.description or "").strip():
+        if not (step.description or "").strip() or (is_new and not step.description_confirmed):
+            suggested_desc = (step.description or "").strip() or step.name
             questions.append(
                 Question(
                     key=f"{step.key}:description",
@@ -513,10 +551,12 @@ def resolve_spec(spec: WorkflowSpec, req: GraphAgentMessageRequest) -> list[Ques
                     prompt="Status description",
                     options=[],
                     group_title=group,
+                    default_value=suggested_desc,
                 )
             )
 
-        if is_new and not step.is_initial and step.is_final is None:
+        if is_new and not step.is_initial and (step.is_final is None or not step.is_final_confirmed):
+            default_final = 1 if step.is_final else (0 if step.is_final is not None else None)
             questions.append(
                 Question(
                     key=f"{step.key}:is_final",
@@ -528,24 +568,28 @@ def resolve_spec(spec: WorkflowSpec, req: GraphAgentMessageRequest) -> list[Ques
                         QuestionOption(id=0, label="No"),
                     ],
                     group_title=group,
+                    default_id=default_final,
                 )
             )
 
-        if req.workflow_type_id == 19 and step.step_type_id is None:
+        if req.workflow_type_id == 19 and (step.step_type_id is None or (is_new and not step.step_type_confirmed)):
             st = match_catalog(step.step_type_name, catalogs.step_types)
-            if st.unique and st.item:
-                step.step_type_id = st.item.id
-            else:
-                questions.append(
-                    question_from_match(
-                        f"{step.key}:step_type",
-                        "step_type",
-                        step.key,
-                        "Workflow step type",
-                        st,
-                        group_title=group,
-                    )
+            default_stid = step.step_type_id if step.step_type_id else (st.item.id if st.item else None)
+            questions.append(
+                question_from_match(
+                    f"{step.key}:step_type",
+                    "step_type",
+                    step.key,
+                    "Workflow step type",
+                    st,
+                    group_title=group,
+                    default_id=default_stid,
                 )
+            )
+
+    # If there are card questions, resolve status cards first before connecting
+    if questions:
+        return questions
 
     step_by_key = {s.key: s for s in spec.steps}
     step_by_name = {s.name.lower(): s for s in spec.steps}
@@ -622,21 +666,37 @@ def resolve_spec(spec: WorkflowSpec, req: GraphAgentMessageRequest) -> list[Ques
             _is_edge_edit(edge) and edge.from_step_id and edge.to_step_id
         )
 
-        if not skip_link_fields and edge.from_step_id is None:
-            node = match_node(edge.from_ref, nodes)
-            if node.unique and node.item:
-                edge.from_step_id = node.item.id
+        if not skip_link_fields and edge.from_step_id is None and edge.from_temp_key is None:
+            src = (edge.from_ref or "").strip()
+            if src in step_by_key:
+                edge.from_temp_key = src
+            elif src.lower() in step_by_name:
+                edge.from_temp_key = step_by_name[src.lower()].key
             else:
-                questions.append(
-                    question_from_match(
-                        f"{edge.key}:from",
-                        "from_step",
-                        edge.key,
-                        "From status card",
-                        node,
-                        group_title=title,
-                    )
-                )
+                best_draft_step = None
+                best_draft_score = 0.0
+                for s in spec.steps:
+                    score = _score(src, s.name)
+                    if score > best_draft_score:
+                        best_draft_score = score
+                        best_draft_step = s
+                if best_draft_step and best_draft_score >= 0.7:
+                    edge.from_temp_key = best_draft_step.key
+                else:
+                    node = match_node(src, nodes)
+                    if node.unique and node.item:
+                        edge.from_step_id = node.item.id
+                    else:
+                        questions.append(
+                            question_from_match(
+                                f"{edge.key}:from",
+                                "from_step",
+                                edge.key,
+                                "From status card",
+                                node,
+                                group_title=title,
+                            )
+                        )
 
         if not skip_link_fields and edge.to_step_id is None and edge.to_temp_key is None:
             dest = (edge.to_ref or "").strip()
@@ -645,60 +705,65 @@ def resolve_spec(spec: WorkflowSpec, req: GraphAgentMessageRequest) -> list[Ques
             elif dest.lower() in step_by_name:
                 edge.to_temp_key = step_by_name[dest.lower()].key
             else:
-                node = match_node(dest, nodes)
-                if node.unique and node.item:
-                    edge.to_step_id = node.item.id
+                best_draft_step = None
+                best_draft_score = 0.0
+                for s in spec.steps:
+                    score = _score(dest, s.name)
+                    if score > best_draft_score:
+                        best_draft_score = score
+                        best_draft_step = s
+                if best_draft_step and best_draft_score >= 0.7:
+                    edge.to_temp_key = best_draft_step.key
                 else:
-                    questions.append(
-                        question_from_match(
-                            f"{edge.key}:to",
-                            "to_step",
-                            edge.key,
-                            "To status card",
-                            node,
-                            group_title=title,
+                    node = match_node(dest, nodes)
+                    if node.unique and node.item:
+                        edge.to_step_id = node.item.id
+                    else:
+                        questions.append(
+                            question_from_match(
+                                f"{edge.key}:to",
+                                "to_step",
+                                edge.key,
+                                "To status card",
+                                node,
+                                group_title=title,
+                            )
                         )
-                    )
 
         # Refresh title after from/to may have resolved
         title = f"Connection {index}: {_connection_title(edge, spec, nodes)}"
 
         action = match_catalog(edge.action_name, catalogs.actions)
-        if not skip_link_fields and edge.action_id is None:
-            if action.unique and action.item:
-                edge.action_id = action.item.id
-                extra = action.item.extra or {}
-                edge.action_type_id = extra.get("actionTypeId")
-                edge.is_instant = bool(extra.get("isInstantAction"))
-            else:
-                questions.append(
-                    question_from_match(
-                        f"{edge.key}:action",
-                        "action",
-                        edge.key,
-                        "Action",
-                        action,
-                        group_title=title,
-                    )
+        if not skip_link_fields and (edge.action_id is None or not edge.action_confirmed):
+            default_aid = edge.action_id if edge.action_id else (action.item.id if action.item else None)
+            questions.append(
+                question_from_match(
+                    f"{edge.key}:action",
+                    "action",
+                    edge.key,
+                    "Action",
+                    action,
+                    group_title=title,
+                    default_id=default_aid,
                 )
+            )
 
         if req.workflow_type_id == 17:
             edge.department_id = req.department_id
-        elif not skip_link_fields and edge.department_id is None:
+        elif not skip_link_fields and (edge.department_id is None or not edge.department_confirmed):
             dept = match_catalog(edge.department_name, catalogs.departments)
-            if dept.unique and dept.item:
-                edge.department_id = dept.item.id
-            else:
-                questions.append(
-                    question_from_match(
-                        f"{edge.key}:department",
-                        "department",
-                        edge.key,
-                        "Department",
-                        dept,
-                        group_title=title,
-                    )
+            default_did = edge.department_id if edge.department_id else (dept.item.id if dept.item else None)
+            questions.append(
+                question_from_match(
+                    f"{edge.key}:department",
+                    "department",
+                    edge.key,
+                    "Department",
+                    dept,
+                    group_title=title,
+                    default_id=default_did,
                 )
+            )
 
         for i, role in enumerate(edge.roles):
             if (
@@ -713,26 +778,22 @@ def resolve_spec(spec: WorkflowSpec, req: GraphAgentMessageRequest) -> list[Ques
                 continue
             role_label = role.role_name or "new role"
             role_group = group if edge.append_roles else title
-            if role.role_id is None:
-                rm = match_catalog(role.role_name, catalogs.roles)
-                if rm.unique and rm.item:
-                    role.role_id = rm.item.id
-                    role.role_name = rm.item.label
-                    extra = rm.item.extra or {}
-                    role.role_meta = extra.get("roleMeta")
-                    role_label = role.role_name
-                else:
-                    questions.append(
-                        question_from_match(
-                            f"{edge.key}:role:{i}",
-                            "role",
-                            edge.key,
-                            "Which role should be added?",
-                            rm,
-                            group_title=role_group,
-                        )
+            rm = match_catalog(role.role_name, catalogs.roles)
+            if role.role_id is None or not role.role_confirmed:
+                default_rid = role.role_id if role.role_id else (rm.item.id if rm.item else None)
+                questions.append(
+                    question_from_match(
+                        f"{edge.key}:role:{i}",
+                        "role",
+                        edge.key,
+                        "Which role should be added?",
+                        rm,
+                        group_title=role_group,
+                        default_id=default_rid,
                     )
-            if role.sla_hours is None:
+                )
+            if not role.sla_confirmed:
+                suggested_role_sla = role.sla_hours if (role.sla_hours is not None and role.sla_hours > 0) else None
                 questions.append(
                     Question(
                         key=f"{edge.key}:role:{i}:sla",
@@ -741,6 +802,7 @@ def resolve_spec(spec: WorkflowSpec, req: GraphAgentMessageRequest) -> list[Ques
                         prompt=f"SLA hours for {role_label} (required)",
                         options=[],
                         group_title=role_group,
+                        default_value=suggested_role_sla,
                     )
                 )
 

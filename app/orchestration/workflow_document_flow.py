@@ -23,7 +23,7 @@ import time
 from typing import Any, AsyncIterator
 
 from app.config import get_settings
-from app.orchestration.document_flow import _prepare_input  # shared prep logic
+from app.orchestration.document_flow import prepare_document_upload as _prepare_input  # shared prep logic
 from app.orchestration.workflow_generate_flow import (
     WorkflowGenerateResult,
     WorkflowGenerateStatus,
