@@ -220,6 +220,30 @@ def _check_node_references(
     if isinstance(awn, dict):
         flag(awn.get("field"), "autoFillWhen.field")
 
+    comp = node.get("computation")
+    if isinstance(comp, dict):
+        flag(comp.get("source_table"), "computation.source_table")
+        flag(comp.get("subtract_table"), "computation.subtract_table")
+        filt = comp.get("filter_condition")
+        if isinstance(filt, dict):
+            flag(filt.get("field"), "computation.filter_condition.field")
+
+    ds = node.get("datasource")
+    if isinstance(ds, dict) and ds.get("type") == "form_field":
+        flag(ds.get("sourceField"), "datasource.sourceField")
+
+    for rule in _as_list(node.get("highlightRules")):
+        if not isinstance(rule, dict):
+            continue
+        cond = rule.get("condition")
+        if isinstance(cond, dict):
+            flag(cond.get("compareWith"), "highlightRules.compareWith")
+            flag(cond.get("compareField"), "highlightRules.compareField")
+
+    ocr_src = node.get("autofillFromOCR")
+    if isinstance(ocr_src, str):
+        flag(ocr_src, "autofillFromOCR")
+
     return out
 
 

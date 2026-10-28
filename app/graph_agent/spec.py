@@ -70,6 +70,9 @@ class TransitionDraft(BaseModel):
     target_role_id: int | None = None
     form_schema: str | None = None
     form_fields_nl: str | None = None
+    # When true, apply update_form/delete_form to every action (and every role
+    # on each action) instead of asking the admin to pick one.
+    apply_all: bool = False
     delete_role: bool = False
     delete_form: bool = False
     delete_transition: bool = False

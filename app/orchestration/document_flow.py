@@ -52,6 +52,7 @@ from app.core.document_convert import (
     extract_docx_text,
     is_docx,
 )
+from app.core.form_merge import merge_generated_sections
 
 # Reuse the exact generate-mode tail so the output contract stays identical.
 from app.orchestration.generate_flow import (
@@ -118,10 +119,15 @@ async def run_document_flow(
     instruction: str | None,
     provider: LLMProvider,
     *,
+    base_form: dict[str, Any] | None = None,
     max_repair_attempts: int | None = None,
 ) -> GenerateResult:
     """
     Generate a complete form from an uploaded document using `provider`.
+
+    When `base_form` is provided (admin already has a form on the canvas), the
+    newly generated sections are APPENDED onto that form so prior sections and
+    fields are preserved.
 
     Returns a GenerateResult (same type generate-mode returns) so the route can
     handle both paths uniformly.
@@ -130,6 +136,7 @@ async def run_document_flow(
         max_repair_attempts = get_settings().max_repair_attempts
 
     flow_started = time.monotonic()
+    append = base_form is not None
 
     # --- Prepare the input (DOCX->text, or native attachment) -------------
     prep_started = time.monotonic()
@@ -137,16 +144,19 @@ async def run_document_flow(
     if prepared.error:
         return GenerateResult(status=GenerateStatus.FAILED, errors=[prepared.error])
     logger.info(
-        "document_flow: prepare took=%.2fs path=%s",
+        "document_flow: prepare took=%.2fs path=%s append=%s",
         time.monotonic() - prep_started,
         "docx_text" if prepared.extracted_text is not None else "attachment",
+        append,
     )
 
     system_prompt = get_system_prompt()
 
     # DOCX text path: no attachment, prompt carries the extracted text.
     if prepared.extracted_text is not None:
-        user_prompt = build_doc_prompt_text_fallback(instruction, prepared.extracted_text)
+        user_prompt = build_doc_prompt_text_fallback(
+            instruction, prepared.extracted_text, append_to_existing=append
+        )
         attachments: list[Attachment] | None = None
     else:
         # Native attachment path (PDF/image/text) — needs provider support.
@@ -160,7 +170,7 @@ async def run_document_flow(
                 ],
             )
         assert prepared.attachment is not None  # guaranteed when no error/text
-        user_prompt = build_doc_prompt(instruction)
+        user_prompt = build_doc_prompt(instruction, append_to_existing=append)
         attachments = [prepared.attachment]
 
     # --- First LLM call: sends the file/text ------------------------------
@@ -175,10 +185,8 @@ async def run_document_flow(
             "document_flow: SUCCESS on first call, no repairs, total=%.1fs",
             time.monotonic() - flow_started,
         )
-        return GenerateResult(
-            status=GenerateStatus.PROPOSAL,
-            form=outcome.form,
-            warnings=prepared.warnings + outcome.warnings,
+        return _finalize_document_result(
+            outcome.form, prepared.warnings + outcome.warnings, base_form
         )
 
     logger.info(
@@ -209,10 +217,8 @@ async def run_document_flow(
                 attempts,
                 time.monotonic() - flow_started,
             )
-            return GenerateResult(
-                status=GenerateStatus.PROPOSAL,
-                form=outcome.form,
-                warnings=prepared.warnings + outcome.warnings,
+            return _finalize_document_result(
+                outcome.form, prepared.warnings + outcome.warnings, base_form
             )
         last_errors = outcome.errors
 
@@ -246,6 +252,7 @@ async def run_document_flow_stream(
     instruction: str | None,
     provider: LLMProvider,
     *,
+    base_form: dict[str, Any] | None = None,
     max_repair_attempts: int | None = None,
 ) -> AsyncIterator[tuple[str, Any]]:
     """Stream a document-mode generation as (event, payload) tuples."""
@@ -253,6 +260,7 @@ async def run_document_flow_stream(
         max_repair_attempts = get_settings().max_repair_attempts
 
     flow_started = time.monotonic()
+    append = base_form is not None
 
     # --- Prepare input ----------------------------------------------------
     prepared = prepare_document_upload(file_bytes, filename, content_type)
@@ -265,6 +273,7 @@ async def run_document_flow_stream(
     if not getattr(provider, "supports_streaming", False):
         result = await run_document_flow(
             file_bytes, filename, content_type, instruction, provider,
+            base_form=base_form,
             max_repair_attempts=max_repair_attempts,
         )
         if result.status is GenerateStatus.FAILED:
@@ -276,7 +285,9 @@ async def run_document_flow_stream(
     system_prompt = get_system_prompt()
 
     if prepared.extracted_text is not None:
-        user_prompt = build_doc_prompt_text_fallback(instruction, prepared.extracted_text)
+        user_prompt = build_doc_prompt_text_fallback(
+            instruction, prepared.extracted_text, append_to_existing=append
+        )
         attachments: list[Attachment] | None = None
     else:
         if not provider.supports_document_input:
@@ -290,7 +301,7 @@ async def run_document_flow_stream(
             )
             return
         assert prepared.attachment is not None
-        user_prompt = build_doc_prompt(instruction)
+        user_prompt = build_doc_prompt(instruction, append_to_existing=append)
         attachments = [prepared.attachment]
 
     # --- First call: STREAM, accumulating the full text -------------------
@@ -312,7 +323,13 @@ async def run_document_flow_stream(
             "document_flow(stream): SUCCESS on first call, total=%.1fs",
             time.monotonic() - flow_started,
         )
-        yield ("done", outcome.form or {})
+        finalized = _finalize_document_result(
+            outcome.form, prepared.warnings + outcome.warnings, base_form
+        )
+        if finalized.status is GenerateStatus.FAILED:
+            yield ("error", finalized.errors)
+        else:
+            yield ("done", finalized.form or {})
         return
 
     logger.info(
@@ -341,7 +358,13 @@ async def run_document_flow_stream(
                 attempts,
                 time.monotonic() - flow_started,
             )
-            yield ("done", outcome.form or {})
+            finalized = _finalize_document_result(
+                outcome.form, prepared.warnings + outcome.warnings, base_form
+            )
+            if finalized.status is GenerateStatus.FAILED:
+                yield ("error", finalized.errors)
+            else:
+                yield ("done", finalized.form or {})
             return
         last_errors = outcome.errors
 
@@ -351,6 +374,35 @@ async def run_document_flow_stream(
         time.monotonic() - flow_started,
     )
     yield ("error", last_errors)
+
+
+def _finalize_document_result(
+    generated: dict[str, Any] | None,
+    warnings: list[str],
+    base_form: dict[str, Any] | None,
+) -> GenerateResult:
+    """
+    If a base form was supplied, append generated sections onto it; otherwise
+    return the generated form as-is.
+    """
+    if generated is None:
+        return GenerateResult(
+            status=GenerateStatus.FAILED,
+            errors=["Document generation produced no form."],
+        )
+    if base_form is None:
+        return GenerateResult(
+            status=GenerateStatus.PROPOSAL, form=generated, warnings=warnings
+        )
+    try:
+        merged, merge_warnings = merge_generated_sections(base_form, generated)
+    except ValueError as exc:
+        return GenerateResult(status=GenerateStatus.FAILED, errors=[str(exc)])
+    return GenerateResult(
+        status=GenerateStatus.PROPOSAL,
+        form=merged,
+        warnings=warnings + merge_warnings,
+    )
 
 
 # --- Internal: normalise the upload -----------------------------------------

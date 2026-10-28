@@ -213,8 +213,11 @@ def extract_json_fields(text: str) -> Any | None:
 def fields_from_mentions(text: str) -> list[dict[str, Any]]:
     """Build simple fields when the user names types (text, email, …)."""
     lower = (text or "").lower()
+    # Tolerate common typos like "feild".
+    lower = re.sub(r"\bfeilds?\b", "field", lower)
     if not re.search(
-        r"form field|custom action|action form|additional field|text field|email field",
+        r"form field|custom action|action form|additional field|text field|email field|"
+        r"remarks?\b|upload",
         lower,
     ) and not re.search(
         r"\b(text|email|number|textarea|dropdown|checkbox|radio|file|date)\b.+\bfield",
@@ -224,11 +227,29 @@ def fields_from_mentions(text: str) -> list[dict[str, Any]]:
         if not re.search(r"\bfields?\b", lower):
             return []
 
-    found: list[str] = []
+    found: list[dict[str, Any]] = []
+    seen_types: list[str] = []
     consumed = lower
+
+    def _add(ftype: str, label: str | None = None) -> None:
+        if ftype in seen_types:
+            return
+        seen_types.append(ftype)
+        item: dict[str, Any] = {"type": ftype}
+        if label:
+            item["label"] = {"en": label, "pa": ""}
+        found.append(item)
+
+    if re.search(r"\bremarks?\b", consumed):
+        _add("textarea", "Remarks")
+        consumed = re.sub(r"\bremarks?\b", " ", consumed)
+    if re.search(r"\bupload(?:\s+file)?\b|\bfile\s+field\b", consumed):
+        _add("file", "Upload file")
+        consumed = re.sub(r"\bupload(?:\s+file)?\b|\bfile\s+field\b", " ", consumed)
+
     for phrase, ftype in _MENTION_ORDER:
         if phrase in consumed:
-            found.append(ftype)
+            _add(ftype)
             consumed = consumed.replace(phrase, " ", 1)
     for token in (
         "email",
@@ -245,10 +266,10 @@ def fields_from_mentions(text: str) -> list[dict[str, Any]]:
     ):
         if re.search(rf"\b{re.escape(token)}\b", consumed):
             mapped = _normalize_type(token)
-            if mapped and mapped not in found:
-                found.append(mapped)
+            if mapped:
+                _add(mapped)
 
-    return normalize_form_fields([{"type": t} for t in found])
+    return normalize_form_fields(found)
 
 
 FORM_PRESETS: dict[int, list[dict[str, Any]]] = {

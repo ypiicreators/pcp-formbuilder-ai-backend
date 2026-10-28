@@ -109,6 +109,22 @@ def _looks_like_update_form(text: str) -> bool:
     )
 
 
+def _looks_like_apply_all(text: str) -> bool:
+    """True when the user wants every action/role, not a single picker."""
+    lower = (text or "").lower()
+    return bool(
+        re.search(
+            r"\b(all|every|each|entire)\b.{0,40}\b(actions?|roles?|workflow)\b|"
+            r"\b(actions?|roles?)\b.{0,40}\b(all|every|each)\b|"
+            r"\bin all (the )?(actions?|roles?)\b|"
+            r"\bacross (the )?(entire )?workflow\b|"
+            r"\bentire workflow\b|"
+            r"\bwhole workflow\b",
+            lower,
+        )
+    )
+
+
 def _looks_like_update_role(text: str) -> bool:
     lower = (text or "").lower()
     if (
@@ -442,6 +458,7 @@ def heuristic_parse(text: str, nodes: list[GraphNodeSnapshot]) -> WorkflowSpec:
                     action_name=action_name,
                     update_form=True,
                     append_roles=False,
+                    apply_all=_looks_like_apply_all(text),
                     form_schema=_schema_from_user_text(text),
                     roles=[],
                 )
@@ -555,9 +572,12 @@ def _coerce_update_form(spec: WorkflowSpec, text: str) -> None:
         spec.transitions.extend(fallback.transitions)
         return
     schema = _schema_from_user_text(text)
+    apply_all = _looks_like_apply_all(text)
     for edge in spec.transitions:
         edge.update_form = True
         edge.append_roles = False
+        if apply_all:
+            edge.apply_all = True
         if schema and not edge.form_schema:
             edge.form_schema = schema
         named = [r for r in edge.roles if r.role_name or r.role_id]
@@ -682,6 +702,7 @@ def spec_from_llm_json(data: dict[str, Any], nodes: list[GraphNodeSnapshot]) -> 
                 append_roles=bool(raw.get("append_roles")) and not deleting,
                 update_form=bool(raw.get("update_form")) and not deleting,
                 update_roles=bool(raw.get("update_roles")) and not deleting,
+                apply_all=bool(raw.get("apply_all")),
                 delete_role=bool(raw.get("delete_role")),
                 delete_form=bool(raw.get("delete_form")),
                 delete_transition=bool(raw.get("delete_transition")),

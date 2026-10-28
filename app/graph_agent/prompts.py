@@ -42,6 +42,7 @@ OUTPUT SHAPE:
       "append_roles": false,
       "update_form": false,
       "update_roles": false,
+      "apply_all": false,
       "delete_role": false,
       "delete_form": false,
       "delete_transition": false,
@@ -68,6 +69,7 @@ RULES:
 - A connection can have MULTIPLE roles. Put every mentioned role in roles[].
 - If the user adds another / one more role to an existing action, set append_roles true and list ONLY the new role(s).
 - If the user wants a custom action form / action form fields on an EXISTING role, set update_form true and append_roles false. Do NOT add a new role. from_ref/to_ref/action_name/role_name may be null so the UI can pick the existing action, then the existing role on that action, then the fields.
+- If the user wants the SAME custom action form on ALL actions and/or ALL roles (e.g. “in all the actions”, “every role”, “entire workflow”), set update_form true AND apply_all true. Leave from_ref/to_ref/action_name null. Do NOT emit one transition per action — one apply_all transition is enough; the binder expands it.
 - Vague “add a custom action in the role” is update_form, not append_roles.
 - Vague “add one more role to the action(s)” is append_roles, not update_form.
 - Never return empty create_steps and empty create_transitions for those requests.

@@ -335,6 +335,75 @@ def test_custom_action_updates_existing_role_not_add_role():
     assert {o.label for o in role_q.options} == {"Naib Tehsildar", "Dealing Clerk"}
 
 
+def test_apply_all_custom_action_skips_action_and_role_pickers():
+    from app.graph_agent.binder import resolve_spec
+    from app.graph_agent.models import GraphEdgeRole, GraphEdgeSnapshot, GraphNodeSnapshot
+    from app.graph_agent.parse import heuristic_parse
+    from app.graph_agent.planner import build_plan
+
+    text = (
+        "in this workflow in all the actions and roles i need to add this custom actions "
+        "remarks feild and upload file feild in all the actions"
+    )
+    spec = heuristic_parse(text, [])
+    assert spec.transitions
+    edge0 = spec.transitions[0]
+    assert edge0.update_form is True
+    assert edge0.apply_all is True
+    assert edge0.form_schema
+
+    req = GraphAgentMessageRequest(
+        workflowId=55,
+        text=text,
+        graph=GraphSnapshot(
+            nodes=[
+                GraphNodeSnapshot(stepId=1, name="Sending to Zonal Tehsildar"),
+                GraphNodeSnapshot(stepId=2, name="All Respondents"),
+                GraphNodeSnapshot(stepId=3, name="Approved"),
+            ],
+            edges=[
+                GraphEdgeSnapshot(
+                    fromStepId=1,
+                    toStepId=2,
+                    actionName="Review",
+                    actionId=9,
+                    roles=[
+                        GraphEdgeRole(roleId=4, roleName="Zonal Tehsildar", slaHours=11),
+                        GraphEdgeRole(roleId=7, roleName="Dealing Clerk", slaHours=8),
+                    ],
+                ),
+                GraphEdgeSnapshot(
+                    fromStepId=2,
+                    toStepId=3,
+                    actionName="Approve",
+                    actionId=10,
+                    roles=[
+                        GraphEdgeRole(roleId=5, roleName="Tehsildar", slaHours=12),
+                    ],
+                ),
+            ],
+        ),
+    )
+    questions = resolve_spec(spec, req)
+    fields = {q.field for q in questions}
+    assert "existing_edge" not in fields
+    assert "existing_role" not in fields
+    assert questions == []
+    assert len(spec.transitions) == 2
+    for edge in spec.transitions:
+        assert edge.apply_all is True
+        assert edge.form_schema
+        assert all(r.action_ui_schema for r in edge.roles)
+
+    plan = build_plan(spec, req)
+    assert len(plan) == 2
+    for op in plan:
+        assert op.op == "create_transition"
+        roles = op.payload["roles"]
+        assert roles
+        assert all(r.get("ActionUiSchema") for r in roles)
+
+
 def test_update_existing_card_plan_uses_step_id():
     from app.graph_agent.binder import resolve_spec
     from app.graph_agent.models import GraphNodeSnapshot

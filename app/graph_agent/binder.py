@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 from app.graph_agent.action_schema import schema_from_user_spec
 from app.graph_agent.models import (
     CatalogsPayload,
@@ -23,6 +25,75 @@ def _is_edge_edit(edge: TransitionDraft) -> bool:
         or edge.delete_form
         or edge.delete_transition
     )
+
+
+def _expand_apply_all(spec: WorkflowSpec, req: GraphAgentMessageRequest) -> None:
+    """Fan one apply_all form edit out to every existing graph edge."""
+    if not req.graph.edges:
+        return
+    out: list[TransitionDraft] = []
+    for edge in spec.transitions:
+        if not edge.apply_all or not (edge.update_form or edge.delete_form):
+            out.append(edge)
+            continue
+        if edge.from_step_id and edge.to_step_id:
+            out.append(edge)
+            continue
+        for i, ge in enumerate(req.graph.edges):
+            clone = edge.model_copy(deep=True)
+            clone.key = edge.key if i == 0 else f"{edge.key}:all:{i}"
+            clone.from_step_id = ge.from_step_id
+            clone.to_step_id = ge.to_step_id
+            if ge.action_id:
+                clone.action_id = ge.action_id
+            if ge.action_name:
+                clone.action_name = ge.action_name
+            if ge.action_type_id:
+                clone.action_type_id = ge.action_type_id
+            if ge.is_instant is not None:
+                clone.is_instant = bool(ge.is_instant)
+            if ge.department_id:
+                clone.department_id = ge.department_id
+            if ge.step_action_id:
+                clone.step_action_id = ge.step_action_id
+            clone.apply_all = True
+            out.append(clone)
+    spec.transitions = out
+
+
+def _sync_apply_all_schemas(spec: WorkflowSpec) -> None:
+    """Share one form schema / NL blob across every apply_all transition."""
+    schema = next(
+        (e.form_schema for e in spec.transitions if e.apply_all and e.form_schema),
+        None,
+    )
+    nl = next(
+        (
+            e.form_fields_nl
+            for e in spec.transitions
+            if e.apply_all and e.form_fields_nl and not e.form_schema
+        ),
+        None,
+    )
+    if not schema and not nl:
+        return
+    for edge in spec.transitions:
+        if not edge.apply_all or not edge.update_form:
+            continue
+        if schema:
+            edge.form_schema = schema
+            edge.form_fields_nl = None
+        elif nl and not edge.form_schema:
+            edge.form_fields_nl = nl
+
+
+def _apply_form_to_all_roles(edge: TransitionDraft) -> None:
+    if not edge.form_schema:
+        return
+    for role in edge.roles:
+        role.action_ui_schema = edge.form_schema
+    if edge.roles and not edge.target_role_id:
+        edge.target_role_id = edge.roles[0].role_id
 
 
 def _node_name(step_id: int | None, nodes) -> str | None:
@@ -301,14 +372,19 @@ def _merge_existing_roles(spec: WorkflowSpec, req: GraphAgentMessageRequest) -> 
             edge.form_schema = incoming_schema
         if edge.update_form:
             edge.roles = existing
-            if edge.target_role_id and edge.form_schema:
+            if edge.apply_all and edge.form_schema:
+                _apply_form_to_all_roles(edge)
+            elif edge.target_role_id and edge.form_schema:
                 for role in edge.roles:
                     if role.role_id == edge.target_role_id:
                         role.action_ui_schema = edge.form_schema
             continue
         if edge.delete_form:
             edge.roles = existing
-            if edge.target_role_id:
+            if edge.apply_all:
+                for role in edge.roles:
+                    role.action_ui_schema = None
+            elif edge.target_role_id:
                 for role in edge.roles:
                     if role.role_id == edge.target_role_id:
                         role.action_ui_schema = None
@@ -378,7 +454,10 @@ def resolve_spec(spec: WorkflowSpec, req: GraphAgentMessageRequest) -> list[Ques
     catalogs = req.catalogs
     nodes = req.graph.nodes
     existing_initial = any(n.is_initial for n in nodes)
+    _expand_apply_all(spec, req)
     _merge_existing_roles(spec, req)
+    _sync_apply_all_schemas(spec)
+    asked_apply_all_form = False
 
     for i, step in enumerate(spec.steps):
         if step.delete:
@@ -607,7 +686,9 @@ def resolve_spec(spec: WorkflowSpec, req: GraphAgentMessageRequest) -> list[Ques
 
         title = f"Connection {index}: {_connection_title(edge, spec, nodes)}"
         needs_existing_link = bool(
-            _is_edge_edit(edge) and not (edge.from_step_id and edge.to_step_id)
+            _is_edge_edit(edge)
+            and not (edge.from_step_id and edge.to_step_id)
+            and not edge.apply_all
         )
         if edge.delete_form:
             group = "Remove custom action"
@@ -619,7 +700,11 @@ def resolve_spec(spec: WorkflowSpec, req: GraphAgentMessageRequest) -> list[Ques
             group = "Remove action"
             action_prompt = "Which action should be removed?"
         elif edge.update_form:
-            group = "Custom action form"
+            group = (
+                "Custom action form (all actions)"
+                if edge.apply_all
+                else "Custom action form"
+            )
             action_prompt = "Which existing action should get the custom action form?"
         elif edge.update_roles:
             group = "Update role"
@@ -627,6 +712,18 @@ def resolve_spec(spec: WorkflowSpec, req: GraphAgentMessageRequest) -> list[Ques
         else:
             group = "Add role"
             action_prompt = "Which existing action should get the extra role?"
+        if edge.apply_all and (edge.update_form or edge.delete_form) and not req.graph.edges:
+            questions.append(
+                Question(
+                    key="no_actions",
+                    field="notice",
+                    entity="session",
+                    prompt="There is no action on this workflow yet. Connect two status cards first.",
+                    options=[],
+                    group_title=group,
+                )
+            )
+            continue
         if needs_existing_link:
             if not req.graph.edges:
                 questions.append(
@@ -817,8 +914,42 @@ def resolve_spec(spec: WorkflowSpec, req: GraphAgentMessageRequest) -> list[Ques
                     matched = ge
                     break
             graph_roles = list(matched.roles) if matched else []
-            if edge.delete_form:
+            if edge.delete_form and not edge.apply_all:
                 graph_roles = [gr for gr in graph_roles if gr.action_ui_schema]
+            if edge.apply_all and (edge.update_form or edge.delete_form):
+                if not graph_roles and edge.update_form:
+                    questions.append(
+                        Question(
+                            key=f"{edge.key}:no_roles",
+                            field="notice",
+                            entity=edge.key,
+                            prompt="That action has no roles yet.",
+                            options=[],
+                            group_title=group,
+                        )
+                    )
+                elif edge.delete_form:
+                    for role in edge.roles:
+                        role.action_ui_schema = None
+                elif edge.update_form and edge.form_schema:
+                    _apply_form_to_all_roles(edge)
+                elif edge.update_form and not edge.form_schema and not asked_apply_all_form:
+                    asked_apply_all_form = True
+                    questions.append(
+                        Question(
+                            key=f"{edge.key}:form_fields",
+                            field="form_fields_nl",
+                            entity=edge.key,
+                            prompt=(
+                                "Describe the action form fields to add on every action and role, "
+                                "or paste Form Builder JSON. "
+                                "Example: remarks field and upload file field."
+                            ),
+                            options=[],
+                            group_title=group,
+                        )
+                    )
+                continue
             if not edge.target_role_id:
                 spoken = next(
                     (r.role_name for r in edge.roles if (not r.existing) and r.role_name),

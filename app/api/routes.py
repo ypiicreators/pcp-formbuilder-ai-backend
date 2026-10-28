@@ -2,10 +2,11 @@
 API routes for the PCP AI Form Builder.
 
 UNIFIED CHAT ENTRY (current): POST /api/form-ai/assist is the single endpoint the
-frontend chat uses. It infers the mode from the request:
+frontend chat uses for text. It infers the mode from the request:
   - base_json ABSENT  -> GENERATE a new form from the prompt (first message)
   - base_json PRESENT -> EDIT that form with the prompt (every later message)
-Document mode is deferred (not wired yet).
+Document uploads use /form-ai/assist-document(-stream). When those receive
+base_json, newly inferred sections are APPENDED onto the existing form.
 
 The older per-mode endpoints (/generate multipart, /generate-nl, /edit) are
 COMMENTED OUT below — kept for reference, superseded by /assist. The underlying
@@ -120,6 +121,13 @@ async def assist(req: AssistRequest) -> GenerateOutcome:
 async def assist_document(
     file: UploadFile = File(..., description="The source document (PDF, DOCX, image, or text)."),
     prompt: str | None = Form(default=None, description="Optional instruction; a server default is used if blank."),
+    base_json: str | None = Form(
+        default=None,
+        description=(
+            "Optional JSON string of the current form. When present, new "
+            "sections from the document are APPENDED (existing sections kept)."
+        ),
+    ),
 ) -> GenerateOutcome:
     """
     Document-mode entry (multipart/form-data).
@@ -128,6 +136,9 @@ async def assist_document(
     template) and the AI infers the application form a citizen would fill in to
     produce/obtain it. PDFs/images/text go straight to the model; DOCX is
     converted to PDF server-side first.
+
+    When `base_json` is sent (a form already on the canvas), newly inferred
+    sections are appended onto that form so earlier sections/fields are kept.
 
     Kept separate from /form-ai/assist because that endpoint carries a JSON body
     (a form object), while this one carries a binary upload — two different
@@ -141,6 +152,8 @@ async def assist_document(
         mb = _MAX_UPLOAD_BYTES // (1024 * 1024)
         raise HTTPException(status_code=422, detail=f"File too large (limit {mb} MB).")
 
+    base_form = _parse_optional_base_json(base_json)
+
     try:
         provider = get_provider()
     except LLMError as exc:
@@ -152,6 +165,7 @@ async def assist_document(
         content_type=file.content_type,
         instruction=prompt,
         provider=provider,
+        base_form=base_form,
     )
     if result.status is GenerateStatus.FAILED:
         raise HTTPException(status_code=422, detail={"errors": result.errors})
@@ -164,6 +178,13 @@ async def assist_document(
 async def assist_document_stream(
     file: UploadFile = File(..., description="The source document (PDF, DOCX, image, or text)."),
     prompt: str | None = Form(default=None, description="Optional instruction; a server default is used if blank."),
+    base_json: str | None = Form(
+        default=None,
+        description=(
+            "Optional JSON string of the current form. When present, new "
+            "sections from the document are APPENDED (existing sections kept)."
+        ),
+    ),
 ) -> StreamingResponse:
     """
     Streaming document-mode entry (Server-Sent Events).
@@ -185,6 +206,13 @@ async def assist_document_stream(
 
     async def event_source():
         # Guard rails first — emit as an error event (stream has 200 status).
+        try:
+            parsed_base = _parse_optional_base_json(base_json)
+        except HTTPException as exc:
+            detail = exc.detail
+            errors = [detail] if isinstance(detail, str) else [str(detail)]
+            yield _sse({"type": "error", "errors": errors})
+            return
         if not data:
             yield _sse({"type": "error", "errors": ["The uploaded file is empty."]})
             return
@@ -205,6 +233,7 @@ async def assist_document_stream(
                 content_type=file.content_type,
                 instruction=prompt,
                 provider=provider,
+                base_form=parsed_base,
             ):
                 if event == "delta":
                     yield _sse({"type": "delta", "text": payload})
@@ -223,6 +252,22 @@ async def assist_document_stream(
             "X-Accel-Buffering": "no",  # disable proxy buffering (nginx) for live flush
         },
     )
+
+
+def _parse_optional_base_json(base_json: str | None) -> dict | None:
+    """Parse an optional multipart `base_json` string into a sections form dict."""
+    if base_json is None or not str(base_json).strip():
+        return None
+    try:
+        parsed = _json.loads(base_json)
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=422, detail="base_json is not valid JSON")
+    if not isinstance(parsed, dict) or "sections" not in parsed:
+        raise HTTPException(
+            status_code=422,
+            detail="base_json must be a form object with a 'sections' array",
+        )
+    return parsed
 
 
 def _sse(obj: dict) -> str:

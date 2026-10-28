@@ -20,6 +20,9 @@ from typing import Any
 
 from app.core.form_index import COLUMN_BEARING_TYPES, FormIndex, NodeKind
 from app.prompts.constants import (
+    ALLOWED_FIELD_TYPES,
+    ALLOWED_TABLE_COLUMN_TYPES,
+    ALLOWED_VALIDATOR_TYPES,
     ROW_KEY_STRATEGIES,
     ROW_VALIDATOR_TYPE,
     TABLE_VALIDATOR_TYPES,
@@ -28,39 +31,23 @@ from app.validation.result import Level, ValidationError
 
 # --- Allowed value sets (from formBuilder.types.ts) -------------------------
 
-FIELD_TYPES: frozenset[str] = frozenset({
-    "text", "email", "phone", "number", "textarea", "select", "multiselect",
-    "radio", "applying_for", "checkbox", "toggle", "date", "datetime", "time",
-    "file", "live_capture", "live_capture_general", "calculated", "age_display",
-    "date_difference", "applicant_aadhaar_ekyc", "beneficiary_aadhaar_ekyc",
-    "guardian_aadhaar_ekyc", "other_aadhaar_ekyc", "pan_verification",
-    "declaration", "mobile_verification", "in_form_login", "pincode", "aadhaar",
-    "otp", "table", "computed_table", "api_trigger", "concatenate", "line_break",
-    "description", "htmlDescription", "verification", "translate_textarea",
-})
+FIELD_TYPES: frozenset[str] = frozenset(ALLOWED_FIELD_TYPES)
 
-# Base set from the TS `Validator.type` union.
-_VALIDATOR_TYPES_TS: frozenset[str] = frozenset({
-    "regex", "minLength", "maxLength", "minValue", "maxValue", "minDate",
-    "maxDate", "trim", "noEmoji", "minResolution", "email", "phone", "aadhaar",
-    "min", "max", "dateEqualOrAfterField", "dateEqualOrBeforeField",
-    "todayAndFuture", "todayAndPast", "dateRangeFromToday", "specificDays",
-})
-
-# Additional validator types observed in the production corpus but not (yet) in
-# the TS union. The running app tolerates these, so we accept them rather than
-# flag valid forms. Kept as a separate set so the drift is visible/auditable.
+# Prompt/admin list plus a few corpus-only types still seen in production JSON.
 _VALIDATOR_TYPES_OBSERVED: frozenset[str] = frozenset({
-    "required", "fileType", "maxSize", "concatenate", "pastOnly", "futureOnly",
-    "minAge", "workingDays",
+    "required", "fileType", "maxSize", "concatenate",
 })
 
-VALIDATOR_TYPES: frozenset[str] = _VALIDATOR_TYPES_TS | _VALIDATOR_TYPES_OBSERVED
+VALIDATOR_TYPES: frozenset[str] = frozenset(ALLOWED_VALIDATOR_TYPES) | _VALIDATOR_TYPES_OBSERVED
 
-TABLE_COLUMN_TYPES: frozenset[str] = frozenset({
-    "text", "number", "calculated", "select", "multiselect", "radio", "date",
-    "checkbox", "file", "live_capture", "live_capture_general", "configuration",
-    "_api_trigger",
+TABLE_COLUMN_TYPES: frozenset[str] = frozenset(ALLOWED_TABLE_COLUMN_TYPES)
+
+_COMPUTED_TABLE_OPS: frozenset[str] = frozenset({
+    "difference", "intersection", "union", "filter", "copy",
+})
+_API_TRIGGER_MODES: frozenset[str] = frozenset({"manual", "auto", "form_load"})
+_OCR_DOC_TYPES: frozenset[str] = frozenset({
+    "passport", "aadhaar", "pan", "driving_license", "voter_id",
 })
 
 #: Field types that must carry an `options` array.
@@ -157,12 +144,32 @@ def _check_field(fld: dict[str, Any], path: str) -> list[ValidationError]:
                 f"field '{fid}' api_config must include an 'endpoint'",
                 path, fid,
             ))
+        mode = fld.get("trigger_mode")
+        if mode is not None and mode not in _API_TRIGGER_MODES:
+            out.append(_err(
+                "invalid_trigger_mode",
+                f"field '{fid}' trigger_mode must be one of {_API_TRIGGER_MODES}, "
+                f"got '{mode}'",
+                path, fid,
+            ))
+
+    # 6b. computed_table needs a computation object
+    if ftype == "computed_table":
+        out += _check_computation(fld, fid, path)
+
+    # 6c. htmlDescription needs htmlContent.en
+    if ftype == "htmlDescription":
+        out += _check_localized(
+            fld.get("htmlContent"), f"field '{fid}' htmlContent", path, fid
+        )
 
     # 7. validators, if present, must use known types
     out += _check_validators(fld.get("validators"), fid, path)
 
     # 8. feature-contract shape checks (transliteration/translation/etc.)
     out += _check_feature_contracts(fld, fid, path)
+    out += _check_file_ocr(fld, fid, path)
+    out += _check_form_field_datasource(fld, fid, path)
 
     # 9. table-specific row-action / key / validator / list-column shape
     if ftype == "table":
@@ -238,6 +245,98 @@ def _check_feature_contracts(
             path, fid,
         ))
 
+    rules = fld.get("highlightRules")
+    if rules is not None and not isinstance(rules, list):
+        out.append(_err(
+            "invalid_highlight_rules",
+            f"field '{fid}' highlightRules must be an array",
+            path, fid,
+        ))
+
+    if fld.get("requiredExpression") and fld.get("required") is not True:
+        out.append(_err(
+            "required_expression_without_required",
+            f"field '{fid}' has requiredExpression but required is not true",
+            path, fid,
+        ))
+
+    return out
+
+
+def _check_file_ocr(fld: dict[str, Any], fid: str, path: str) -> list[ValidationError]:
+    out: list[ValidationError] = []
+    if fld.get("OCR") is True:
+        doc_type = fld.get("doc_type")
+        if not isinstance(doc_type, str) or not doc_type.strip():
+            out.append(_err(
+                "ocr_missing_doc_type",
+                f"field '{fid}' has OCR true but no doc_type "
+                f"(passport|aadhaar|pan|driving_license|voter_id)",
+                path, fid,
+            ))
+        elif doc_type not in _OCR_DOC_TYPES:
+            out.append(_err(
+                "invalid_ocr_doc_type",
+                f"field '{fid}' doc_type '{doc_type}' is not one of {_OCR_DOC_TYPES}",
+                path, fid,
+            ))
+    return out
+
+
+def _check_form_field_datasource(
+    node: dict[str, Any], nid: str, path: str
+) -> list[ValidationError]:
+    ds = node.get("datasource")
+    if not isinstance(ds, dict) or ds.get("type") != "form_field":
+        return []
+    if not isinstance(ds.get("sourceField"), str) or not str(ds["sourceField"]).strip():
+        return [_err(
+            "missing_form_field_source",
+            f"'{nid}' datasource.type is form_field but sourceField is missing",
+            path, nid,
+        )]
+    return []
+
+
+def _check_computation(
+    fld: dict[str, Any], fid: str, path: str
+) -> list[ValidationError]:
+    out: list[ValidationError] = []
+    comp = fld.get("computation")
+    if not isinstance(comp, dict):
+        return [_err(
+            "missing_computation",
+            f"field '{fid}' of type 'computed_table' must define 'computation'",
+            path, fid,
+        )]
+    op = comp.get("operation")
+    if op not in _COMPUTED_TABLE_OPS:
+        out.append(_err(
+            "invalid_computation_operation",
+            f"field '{fid}' computation.operation must be one of "
+            f"{_COMPUTED_TABLE_OPS}, got '{op}'",
+            path, fid,
+        ))
+    if not isinstance(comp.get("source_table"), str) or not comp["source_table"].strip():
+        out.append(_err(
+            "missing_computation_source",
+            f"field '{fid}' computation needs a non-empty source_table field id",
+            path, fid,
+        ))
+    if not isinstance(comp.get("match_key"), str) or not comp["match_key"].strip():
+        out.append(_err(
+            "missing_computation_match_key",
+            f"field '{fid}' computation needs a non-empty match_key column id",
+            path, fid,
+        ))
+    if op in ("difference", "intersection"):
+        sub = comp.get("subtract_table")
+        if not isinstance(sub, str) or not sub.strip():
+            out.append(_err(
+                "missing_computation_subtract",
+                f"field '{fid}' computation.{op} needs subtract_table",
+                path, fid,
+            ))
     return out
 
 
@@ -386,7 +485,7 @@ def _check_table_config(
                         path, fid,
                     ))
 
-    for flag in ("showAsTag", "dynamicId"):
+    for flag in ("showAsTag", "dynamicId", "showTotal"):
         if fld.get(flag):
             out.append(_err(
                 "column_flag_on_table",
@@ -426,9 +525,37 @@ def _check_column(col: dict[str, Any], path: str) -> list[ValidationError]:
                 path, cid,
             ))
 
+    if col.get("showTotal") and ctype != "number":
+        out.append(_err(
+            "show_total_on_non_number",
+            f"column '{cid}' has showTotal but type is '{ctype}' — "
+            f"Show Total Sum is only valid on type \"number\"",
+            path, cid,
+        ))
+
     out += _check_validators(col.get("validators"), cid, path)
     # Column transliteration/translation use the same flat keys as fields.
     out += _check_feature_contracts(col, cid, path)
+    out += _check_file_ocr(col, cid, path)
+    out += _check_form_field_datasource(col, cid, path)
+    if ctype in ("_api_trigger", "button"):
+        cfg = col.get("api_config")
+        if isinstance(cfg, dict) and not cfg.get("endpoint"):
+            out.append(_err(
+                "missing_api_endpoint",
+                f"column '{cid}' api_config must include an 'endpoint'",
+                path, cid,
+            ))
+        mode = col.get("trigger_mode") or (
+            cfg.get("trigger_mode") if isinstance(cfg, dict) else None
+        )
+        if mode is not None and mode not in _API_TRIGGER_MODES:
+            out.append(_err(
+                "invalid_trigger_mode",
+                f"column '{cid}' trigger_mode must be one of {_API_TRIGGER_MODES}, "
+                f"got '{mode}'",
+                path, cid,
+            ))
     return out
 
 

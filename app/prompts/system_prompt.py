@@ -52,6 +52,8 @@ OUTPUT SHAPE (flat, top-level keys) -- consumed by the frontend loadFromJSON():
   "category":    string,
   "version":     string,
   "jurisdiction"?: {{ "level": string, "field": string }} | null,
+  "verify_declaration"?: {{ "aadhaar_ekyc"?: boolean, "declaration"?: boolean }},
+  "constants"?: object,
   "sections":    Section[],
   "crossFieldValidators"?: CrossFieldValidator[]
 }}
@@ -74,16 +76,24 @@ Field = {{
   "placeholder"?: LocalizedText,
   "description"?: LocalizedText,
   "required"?: boolean,
+  "requiredExpression"?: string, // required only when this expression is true
   "readonly"?: boolean,
+  "isDisabled"?: boolean,
   "hidden"?: boolean,
+  "trim"?: boolean, "capitalizeFirstWord"?: boolean, "capitalizeAll"?: boolean,
   "validators"?: Validator[],
   "options"?: Option[],         // REQUIRED for select | multiselect | radio | applying_for
+  "datasource"?: object,        // API or form_field options; see FEATURE CONTRACTS
   "columns"?: TableColumn[],    // REQUIRED for table | computed_table | verification
   "visibleWhen"?: object,       // keys MUST reference existing field ids
   "hiddenWhen"?: object,
   "disabledWhen"?: object,
   "dependsOn"?: string[],       // MUST reference existing field ids
-  "dependsOnAny"?: string[]     // MUST reference existing field ids
+  "dependsOnAny"?: string[],    // MUST reference existing field ids
+  "highlightRules"?: array
+  // type-specific and advanced keys: see FEATURE CONTRACTS (file/OCR, eKYC/PAN
+  // autofill, profile/OCR autofill, date format, api_trigger, computed_table,
+  // htmlContent, concatenate, formula, ...). Omit a key unless the field needs it.
   // table-only (see FEATURE CONTRACT "Table field configuration"):
   // minRows, maxRows, disableMinMaxRows, conditionalRows,
   // addRowLabel, removeRowLabel,
@@ -91,14 +101,17 @@ Field = {{
   // disableEditWhen, disableDeleteWhen,
   // rowKey, rowKeyStrategy, rowValidators, tableValidators,
   // enableListColumns, listColumns
-  // include other schema props ONLY when the field genuinely needs them
 }}
 
 LocalizedText = {{ "en": string, "pa"?: string, "hi"?: string }}   // "en" REQUIRED
 Option        = {{ "value": string, "label": LocalizedText }}
-Validator     = {{ "type": ValidatorType, "value"?: any, "pattern"?: string, "message"?: string }}
+Validator     = {{ "type": ValidatorType, "value"?: any, "pattern"?: string,
+                  "message"?: string, "errorMessage"?: LocalizedText,
+                  "field"?: string, "condition"?: string }}
 CrossFieldValidator = {{ "id": string, "type": "custom", "expression": string,
-                        "errorMessage": string | LocalizedText }}
+                        "errorMessage": string | LocalizedText,
+                        "validatesTableColumn"?: boolean,
+                        "tableField"?: string, "columnToValidate"?: string }}
 
 NESTED SHAPES (use EXACTLY these when the type calls for them):
 
@@ -120,24 +133,50 @@ NESTED SHAPES (use EXACTLY these when the type calls for them):
       "formula"?: string,
       "showAsTag"?: boolean,            // tag in the table list; drawer still uses the field
       "dynamicId"?: boolean,            // append row number to id (activity_name -> activity_name1)
+      "showTotal"?: boolean,            // NUMBER columns ONLY — Form Builder "Show Total Sum"
+                                        // set true ONLY when the user asks for a sum/total of THAT column
+      "minValue"?: number, "maxValue"?: number, "maxLength"?: number,  // number columns
       "transliteration"?: boolean,      // SAME keys as fields; target is a sibling COLUMN id
       "transliterationField"?: string,
       "transliterationWhen"?: object,
       "trim"?: boolean, "capitalizeFirstWord"?: boolean, "capitalizeAll"?: boolean,
-      "conditionalAutoFillWhen"?: array  // static/default fill: autoFill.source "static"
+      "conditionalAutoFillWhen"?: array,  // static/default fill: autoFill.source "static"
+      "requiredExpression"?: string,
+      "datasource"?: object,   // API url/method/payload OR type "form_field"
+      "format"?: string, "minDate"?: string, "maxDate"?: string,
+      "width"?: string,
+      "translation"?: boolean, "translationField"?: string,
+      // file/live_capture columns: allowedTypes, maxSizeMB, OCR, doc_type, ...
+      // configuration columns: configOptions, defaultNewRowValue, ...
+      // _api_trigger / button columns: api_config, button_props, trigger_mode
     }}
     select / multiselect / radio columns MUST include a non-empty "options" array
     when the choices are a fixed list (Static Options). Do NOT set "datasource"
     for hardcoded lists. Each column has its own options.
+    For number columns: set "showTotal": true ONLY when the requirement explicitly
+    asks for a total/sum of that named column (e.g. income). Omit showTotal
+    otherwise — do not enable it on every number column by default.
     TableColumnType MUST be one of (a DIFFERENT, smaller list than FieldType):
 {table_column_types}
     A type "table" field ALSO takes the row-action / row-key / validator properties
     listed on Field above and in the Table field configuration FEATURE CONTRACT.
     type "verification" uses columns but does NOT use disableAddRow / rowValidators /
-    dynamicId (no repeating-row management).
+    dynamicId (no repeating-row management). Nested verification columns use
+    type "verification".
 
-- api_trigger carries "api_config":
+- api_trigger (and _api_trigger / button columns) carry trigger_mode + api_config.
+    See FEATURE CONTRACT "API trigger". Minimum:
     {{ "endpoint": string, "method"?: "GET"|"POST"|"PUT"|"DELETE", "base_url"?: string }}
+    Prefer the full api_config (payload_mapping, auto_fill_mapping, execute_when,
+    lock_filled_fields, button_props) when the requirement describes a lookup button.
+
+- computed_table MUST include "columns" AND "computation"
+    (operation, source_table, match_key; subtract_table for difference/intersection).
+    See FEATURE CONTRACT "Computed table". NEVER use "formula" on computed_table.
+
+- htmlDescription MUST include "htmlContent": LocalizedText.
+- file / live_capture: see FEATURE CONTRACT "File upload / live capture".
+- otp (standalone): linkedField + otpSource. Prefer mobile_verification for SMS OTP.
 
 - applying_for: at most ONE per form; its "id" MUST be exactly "{APPLYING_FOR_FIXED_ID}".
   Its options are the fixed pair:
@@ -185,7 +224,8 @@ HARD RULES:
     conditional auto-fill, visibility, dependencies, concatenation, calculation,
     age/date-difference, table row actions / keys / validators / column flags),
     add the EXACT properties from the FEATURE CONTRACTS below to a normal field
-    (or, for showAsTag / dynamicId / column transliteration, to a TableColumn).
+    (or, for showAsTag / dynamicId / showTotal / column transliteration /
+    form_field datasource / file OCR / api_trigger, to a TableColumn).
     Do NOT invent a field type for a feature, and do NOT rename these properties.
     Every field or column id referenced by a feature MUST exist in the form.
 

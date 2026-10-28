@@ -49,7 +49,9 @@ async def node_parse(state: AgentState) -> dict:
     waiting_for_form = bool(
         stored_spec
         and any(
-            e.update_form and e.target_role_id and not e.form_schema
+            e.update_form
+            and not e.form_schema
+            and (e.target_role_id or e.apply_all)
             for e in stored_spec.transitions
         )
     )
@@ -67,18 +69,30 @@ async def node_parse(state: AgentState) -> dict:
     }
     if waiting_for_form and req.text.strip() and not text_answers:
         for edge in spec.transitions:
-            if edge.update_form and edge.target_role_id and not edge.form_schema:
+            if (
+                edge.update_form
+                and not edge.form_schema
+                and (edge.target_role_id or edge.apply_all)
+            ):
                 text_answers[f"{edge.key}:form_fields"] = req.text.strip()
                 break
     if id_answers or text_answers:
         apply_answers(spec, id_answers, req.catalogs, req.graph, text_answers)
 
+    shared_schema = None
     for edge in spec.transitions:
         blob = edge.form_fields_nl
         if edge.update_form and not edge.form_schema and blob:
             schema = await interpret_form_fields(blob)
             if schema:
                 edge.form_schema = schema
+                edge.form_fields_nl = None
+                if edge.apply_all:
+                    shared_schema = schema
+    if shared_schema:
+        for edge in spec.transitions:
+            if edge.apply_all and edge.update_form:
+                edge.form_schema = shared_schema
                 edge.form_fields_nl = None
     return {"spec": spec}
 

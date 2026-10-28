@@ -17,7 +17,7 @@ What we KEEP (enough to reason and target ids):
   - for select/radio/multiselect: the first 1-2 option VALUES as a shape hint
   - PRESENCE markers for conditional/dependency/nested features
     (visibleWhen, conditionalAutoFillWhen, dependsOn, columns, mobile/otp,
-    table row-actions/validators, column showAsTag/dynamicId, ...)
+    table row-actions/validators, column showAsTag/dynamicId/showTotal, ...)
     so the model knows the field participates in logic, without the full body
   - table columns compacted the same way (id + type + required)
 
@@ -60,7 +60,16 @@ FEATURE_MARKER_KEYS = (
     "rowValidators", "tableValidators",
     "enableListColumns", "listColumns",
     "minRows", "maxRows", "disableMinMaxRows", "conditionalRows",
-    "showAsTag", "dynamicId",
+    "showAsTag", "dynamicId", "showTotal",
+    # additional Form Builder features
+    "requiredExpression", "highlightRules",
+    "autofillFromProfile", "autofillFromOCR",
+    "autoFillFormAadharEkyc", "autoFillFormPan", "lockAfterAutoFill",
+    "OCR", "allowedTypes", "enableBlurDetection",
+    "computation", "htmlContent",
+    "trigger_mode", "trigger_on_change",
+    "trim", "capitalizeFirstWord", "capitalizeAll",
+    "format", "minDate", "maxDate",
 )
 
 
