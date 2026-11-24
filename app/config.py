@@ -35,6 +35,10 @@ class Settings(BaseSettings):
     # Bounded repair loop: max number of repair attempts before bailing out.
     max_repair_attempts: int = 2
 
+    # When True, generate-mode rejects vague prompts (no fields/service named)
+    # and asks the admin for detail instead of inventing a default form.
+    strict_generate_prompt: bool = True
+
     # --- Azure OpenAI provider settings (read only by that adapter) --------
     azure_openai_endpoint: str = ""
     azure_openai_deployment: str = ""

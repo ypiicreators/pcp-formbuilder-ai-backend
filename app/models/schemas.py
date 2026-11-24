@@ -209,14 +209,16 @@ class ClarificationResponse(BaseModel):
     Non-terminal outcome (HTTP 200): the backend could not uniquely resolve the
     target field and is asking the admin to choose (plan v3 §7.5, §7.6).
 
-    No change-set is produced. The frontend renders `options` (plus an optional
-    "all" choice) and re-submits with the disambiguated instruction.
+    No change-set is produced. The frontend renders `options` when non-empty
+    (edit disambiguation); an empty list means a free-text follow-up only
+    (generate preflight).
     """
 
     status: Literal["needs_clarification"] = "needs_clarification"
     question: str = Field(..., description="Prompt to show the admin.")
     options: list[ClarificationOption] = Field(
-        ..., description="Candidate target fields to choose from."
+        default_factory=list,
+        description="Candidate target fields to choose from (empty for generate preflight).",
     )
     allow_all: bool = Field(
         default=False,

@@ -300,6 +300,15 @@ RULES:
   to sum. NEVER put showTotal on the table field itself.
 - Do not return an empty array when the instruction asks to add, enable, or
   configure something.
+- If the instruction says to REMOVE / DELETE a field, you MUST emit removeField
+  for that field's id. Do not substitute a property edit (transliteration,
+  required, visibleWhen, etc.) for a removal. "Remove select member" means
+  remove the field whose label/id refers to member selection (e.g. profile_member).
+- Mandatory / non-mandatory / optional / required: setProp "required" to true or
+  false on each named field. Use unsetProp "required" only when optional should
+  clear the flag. Apply every field the instruction names; do not edit unrelated ids.
+- Address ONLY what this instruction asks for — do not add transliteration or
+  other features unless explicitly requested.
 - Output the JSON array ONLY. No markdown fences, no commentary.
 {target_section}
 COMPACT VIEW OF THE FORM:

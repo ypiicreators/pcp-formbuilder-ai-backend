@@ -29,6 +29,7 @@ Pure Python: no LLM, no FastAPI.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field as dc_field
 from enum import Enum
 from typing import Any
@@ -73,6 +74,27 @@ class ContextSelection:
 _NEIGHBORHOOD_DEPTH = 2
 _NEIGHBORHOOD_MAX = 25
 
+#: A multi-clause prompt ("remove X and add Y") must not resolve to a single
+#: field — otherwise the LLM only sees that field and skips the other actions.
+_ACTION_VERB_RE = re.compile(
+    r"\b(remove|delete|add|create|insert|replace|build|generate|make|set|"
+    r"update|change|hide|show|move|rename|require|enable|disable|edit)\b",
+    re.IGNORECASE,
+)
+_CONNECTOR_RE = re.compile(
+    r"\b(?:then|after that|also|additionally|and then)\b",
+    re.IGNORECASE,
+)
+
+
+def _looks_like_multi_intent(prompt: str) -> bool:
+    text = (prompt or "").strip()
+    if not text:
+        return False
+    if _CONNECTOR_RE.search(text) and _ACTION_VERB_RE.search(text):
+        return True
+    return len(_ACTION_VERB_RE.findall(text)) >= 2
+
 
 def select_context(form: dict[str, Any], prompt: str) -> ContextSelection:
     """
@@ -82,6 +104,13 @@ def select_context(form: dict[str, Any], prompt: str) -> ContextSelection:
     context construction.
     """
     index = build_index(form)
+
+    if _looks_like_multi_intent(prompt):
+        return _full_form(
+            form,
+            reason="multi-intent instruction; sending full compact form",
+        )
+
     resolution = resolve_target(index, prompt)
 
     if resolution.outcome is Outcome.AMBIGUOUS:

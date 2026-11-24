@@ -23,6 +23,7 @@ from fastapi import APIRouter, File, Form, HTTPException, UploadFile
 from fastapi.responses import StreamingResponse
 
 from app.config import get_settings
+from app.core.generate_prompt_gate import assess_generate_prompt_sufficiency
 from app.models.schemas import (
     AssistRequest,
     ClarificationResponse,
@@ -277,6 +278,10 @@ def _sse(obj: dict) -> str:
 
 async def _run_generate(description: str) -> GenerateOutcome:
     """Drive the generate-mode pipeline and map its result to an HTTP response."""
+    clarify = assess_generate_prompt_sufficiency(description)
+    if clarify:
+        return ClarificationResponse(question=clarify, options=[], allow_all=False)
+
     try:
         provider = get_provider()
     except LLMError as exc:
@@ -599,6 +604,10 @@ async def workflow_assist_document_stream(
 
 async def _run_workflow_generate(description: str) -> GenerateOutcome:
     """Drive the workflow generate pipeline and map to an HTTP response."""
+    clarify = assess_generate_prompt_sufficiency(description)
+    if clarify:
+        return ClarificationResponse(question=clarify, options=[], allow_all=False)
+
     try:
         provider = get_provider()
     except LLMError as exc:
