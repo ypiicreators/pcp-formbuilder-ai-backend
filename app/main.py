@@ -6,12 +6,15 @@ Run locally with:
 """
 
 import logging
+from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from app.api.kb_routes import router as kb_router
 from app.api.routes import router
 from app.config import get_settings
+from app.db import mongo
 from app.graph_agent.api import router as graph_agent_router
 
 settings = get_settings()
@@ -23,10 +26,19 @@ logging.basicConfig(
     format="%(asctime)s %(levelname)s %(name)s: %(message)s",
 )
 
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    """Open MongoDB on startup and close it on shutdown (no-op if MONGO_URI is empty)."""
+    await mongo.connect()
+    yield
+    await mongo.close()
+
+
 app = FastAPI(
     title=settings.app_name,
     version=settings.app_version,
     debug=settings.debug,
+    lifespan=lifespan,
 )
 
 # CORS -- allow the admin portal origins (mirrors the extractor service policy).
@@ -40,6 +52,7 @@ app.add_middleware(
 
 # All routes are served under /api (e.g. /api/form-ai/generate, /api/health).
 app.include_router(router, prefix="/api")
+app.include_router(kb_router, prefix="/api/kb")
 app.include_router(graph_agent_router, prefix="/api")
 
 

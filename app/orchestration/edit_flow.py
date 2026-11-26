@@ -43,6 +43,9 @@ from app.core.change_set import (
 )
 from app.core.context_selector import ContextLevel, select_context, select_context_for_ids
 from app.core.change_set import Op  # noqa: F401  (re-exported for typing clarity)
+from app.kb.binder import bind_kb_to_form
+from app.kb.loader import fetch_live_kb
+from app.kb.prompt import build_kb_prompt_block
 from app.prompts.system_prompt import get_system_prompt
 from app.prompts.user_prompts import build_edit_prompt, build_repair_prompt
 from app.providers.base import LLMError, LLMProvider
@@ -112,11 +115,16 @@ async def run_edit_flow(
                 context_level=selection.level.value,
             )
 
+    kb_snapshot = await fetch_live_kb()
+    kb_block = build_kb_prompt_block(kb_snapshot, instruction, mode="edit")
+
     # --- 2. First LLM call ------------------------------------------------
     system_prompt = get_system_prompt()
     user_prompt = build_edit_prompt(
         selection.context or {}, instruction, target_field_ids=target_field_ids
     )
+    if kb_block:
+        user_prompt = f"{user_prompt}\n\n{kb_block}"
 
     try:
         raw = await provider.generate(system_prompt, user_prompt)
@@ -128,7 +136,9 @@ async def run_edit_flow(
         )
 
     # --- 3. Parse + apply + validate (deterministic) ----------------------
-    outcome = _parse_apply_validate(form, raw)
+    outcome = _parse_apply_validate(
+        form, raw, kb_snapshot=kb_snapshot, user_text=instruction
+    )
     if outcome.ok:
         return _finalize(form, outcome.updated, outcome.warnings, selection.level.value)
 
@@ -147,7 +157,9 @@ async def run_edit_flow(
                 errors=[f"LLM repair call failed: {exc}"],
                 context_level=selection.level.value,
             )
-        outcome = _parse_apply_validate(form, last_raw)
+        outcome = _parse_apply_validate(
+            form, last_raw, kb_snapshot=kb_snapshot, user_text=instruction
+        )
         if outcome.ok:
             return _finalize(
                 form, outcome.updated, outcome.warnings, selection.level.value
@@ -174,7 +186,13 @@ class _StepOutcome:
     errors: list[str] = dc_field(default_factory=list)
 
 
-def _parse_apply_validate(form: dict[str, Any], raw: str) -> _StepOutcome:
+def _parse_apply_validate(
+    form: dict[str, Any],
+    raw: str,
+    *,
+    kb_snapshot: list | None = None,
+    user_text: str = "",
+) -> _StepOutcome:
     """
     Turn raw LLM text into an applied+validated form, or a list of errors the
     repair prompt can act on. Pure/deterministic.
@@ -187,15 +205,20 @@ def _parse_apply_validate(form: dict[str, Any], raw: str) -> _StepOutcome:
     if not applied.ok:
         return _StepOutcome(ok=False, errors=[f"apply: {e}" for e in applied.errors])
 
-    result = validate_form(applied.form)
+    bound = applied.form
+    kb_warnings: list[str] = []
+    if kb_snapshot:
+        bound, kb_warnings = bind_kb_to_form(bound, kb_snapshot, user_text)
+
+    result = validate_form(bound)
     if not result.ok:
         return _StepOutcome(ok=False, errors=result.error_messages())
 
     return _StepOutcome(
         ok=True,
-        updated=applied.form,
+        updated=bound,
         applied_ids=applied.applied_field_ids,
-        warnings=result.warning_messages(),
+        warnings=kb_warnings + result.warning_messages(),
     )
 
 

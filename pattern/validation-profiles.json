@@ -1,0 +1,83 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "profiles": {
+    "INDIA_PINCODE": {
+      "semanticType": "pincode",
+      "storageType": "string",
+      "rules": [
+        { "type": "requiredWhenVisible" },
+        { "type": "maxLength", "value": 6 },
+        { "type": "regex", "pattern": "^[1-9][0-9]{5}$" }
+      ],
+      "businessMeaning": "Exactly six digits; first digit cannot be zero."
+    },
+    "INDIA_MOBILE": {
+      "semanticType": "mobile",
+      "storageType": "string",
+      "rules": [
+        { "type": "requiredWhenVisible" },
+        { "type": "regex", "pattern": "^[6-9][0-9]{9}$" },
+        { "type": "minLength", "value": 10 },
+        { "type": "maxLength", "value": 10 }
+      ]
+    },
+    "NAME_EN": {
+      "semanticType": "name",
+      "language": "en",
+      "storageType": "string",
+      "rules": [
+        { "type": "trim" },
+        { "type": "minLength", "value": 3 },
+        { "type": "maxLength", "value": 50 },
+        { "type": "regex", "pattern": "^(?!.*\\s{2})[A-Za-z\\s]+$" }
+      ]
+    },
+    "NAME_PA": {
+      "semanticType": "name",
+      "language": "pa",
+      "storageType": "string",
+      "rules": [
+        { "type": "trim" },
+        { "type": "minLength", "value": 3 },
+        { "type": "maxLength", "value": 50 },
+        { "type": "regex", "pattern": "^[\\u0A00-\\u0A7F]+(?:\\s[\\u0A00-\\u0A7F]+)*$" }
+      ]
+    },
+    "ADDRESS_EN": {
+      "semanticType": "address",
+      "language": "en",
+      "storageType": "string",
+      "rules": [
+        { "type": "trim" },
+        { "type": "minLength", "value": 5 },
+        { "type": "maxLength", "value": 200 }
+      ]
+    },
+    "EMAIL": {
+      "semanticType": "email",
+      "storageType": "string",
+      "rules": [
+        { "type": "trim" },
+        { "type": "email" },
+        { "type": "maxLength", "value": 100 }
+      ]
+    },
+    "AADHAAR": {
+      "semanticType": "aadhaar",
+      "storageType": "string",
+      "rules": [
+        { "type": "maxLength", "value": 12 },
+        { "type": "regex", "pattern": "^[2-9][0-9]{11}$" },
+        { "type": "verhoeffChecksum" }
+      ]
+    },
+    "PAN": {
+      "semanticType": "pan",
+      "storageType": "string",
+      "transform": "uppercase",
+      "rules": [
+        { "type": "regex", "pattern": "^[A-Z]{5}[0-9]{4}[A-Z]$" }
+      ]
+    }
+  }
+}

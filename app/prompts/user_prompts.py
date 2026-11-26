@@ -12,19 +12,52 @@ carry the admin's input for each mode:
 
 import json
 
-# Default instruction inserted server-side when the admin leaves the document-mode
-# instruction blank (per API contract section 4.7).
+# Default instruction when document-mode prompt is blank (API contract §4.7).
 DEFAULT_DOC_INSTRUCTION: str = (
-    "Infer the citizen application form required to produce/obtain this document."
+    "Implement every section and field defined in the uploaded document as "
+    "Form Builder JSON. Do not omit, merge, or rename sections or fields."
 )
 
-#: Used when a document is uploaded against an EXISTING form — only new
-#: sections for this document should be generated; the server appends them.
+#: Used when a document is uploaded against an EXISTING form — only sections
+#: defined in this document are generated; the server appends them.
 DEFAULT_DOC_APPEND_INSTRUCTION: str = (
-    "Infer NEW section(s) and fields from this document only. Do not recreate "
-    "or replace any existing sections — they will be preserved and your output "
-    "will be appended."
+    "Implement every NEW section and field defined in this document only. Do "
+    "not recreate or replace existing canvas sections — your output will be "
+    "appended."
 )
+
+# Shared fidelity rules for attachment and extracted-text document paths.
+_DOC_FIDELITY_RULES: str = """\
+Rules specific to this mode:
+- The uploaded document IS the source of truth for sections and fields. Your job
+  is to IMPLEMENT it in Form Builder JSON — not to guess, summarize, redesign, or
+  infer a different form.
+- Include EVERY section the document defines (numbered headings, titled blocks,
+  tables grouped by section, etc.). Do not merge separate sections or drop any.
+- Include EVERY field the document lists for each section. One row/line per field
+  unless the document explicitly defines a table/computed_table field type.
+- Preserve section titles and field labels from the document (use "en" labels;
+  add "pa" / "hi" only when the document provides that text).
+- Use the field TYPE named in the document when it matches allowed FieldTypes;
+  otherwise choose the closest allowed type and keep the label.
+- Map dependency / visibility / autofill notes from the document to visibleWhen,
+  dependsOn, datasource, eKYC autofill, profile autofill, and related FEATURE
+  CONTRACT properties using stable field ids derived from labels.
+- Do NOT invent fields, sections, or options that are not in the document.
+- Do NOT replace a list of fields with a generic table unless the document's
+  type column says table or computed_table.
+- Issuing-authority boilerplate, signatures, and decorative seals are not fields —
+  skip only those if they appear as document chrome, not as listed inputs.
+"""
+
+
+def _doc_append_rules() -> str:
+    return """
+- An existing form ALREADY exists on the canvas. Emit ONLY section(s) and fields
+  defined in THIS document. Do not recreate prior canvas sections.
+- Prefer fresh section/field ids that will not collide with names already in use.
+- The server APPENDS your sections; existing canvas fields must remain untouched.
+"""
 
 
 def build_nl_prompt(description: str) -> str:
@@ -53,6 +86,54 @@ REQUIREMENT:
 """
 
 
+def build_section_spec_prompt(
+    *,
+    section_number: int,
+    section_title: str,
+    field_rows: list[tuple[str, str, str]],
+    section_index: int,
+    total_sections: int,
+    instruction: str | None,
+    document_checklist: str,
+) -> str:
+    """
+    One numbered spec section -> a single Section in { "sections": [ ... ] }.
+    Used by section-by-section document orchestration for pipe-table specs.
+    """
+    admin_instruction = (instruction or "").strip() or DEFAULT_DOC_INSTRUCTION
+    rows = "\n".join(
+        f"  - {name} | {ftype} | {dep}"
+        for name, ftype, dep in field_rows
+    )
+    return f"""\
+MODE: generate_from_document_section ({section_index} of {total_sections})
+
+Implement ONLY the section below as Form Builder JSON. Output a form object with
+EXACTLY ONE entry in "sections" — no other sections.
+
+{_DOC_FIDELITY_RULES}
+DOCUMENT CHECKLIST (full form — do not skip other sections in later calls):
+\"\"\"
+{document_checklist.strip()}
+\"\"\"
+
+THIS SECTION ({section_number}. {section_title}) — implement EVERY row:
+\"\"\"
+{rows}
+\"\"\"
+
+- section.id: stable snake_case from the section title (unique within the form).
+- One field per row; label.en from the Field Name column; type from the Type column.
+- Map the Dependency column to visibleWhen, dependsOn, autofill/source props, etc.
+- Punjabi label fields only when the row name mentions Punjabi.
+
+ADMIN INSTRUCTION:
+\"\"\"
+{admin_instruction}
+\"\"\"
+"""
+
+
 def build_doc_prompt(
     instruction: str | None, *, append_to_existing: bool = False
 ) -> str:
@@ -73,34 +154,14 @@ def build_doc_prompt(
         else DEFAULT_DOC_INSTRUCTION
     )
     admin_instruction = (instruction or "").strip() or default
-    append_rules = ""
-    if append_to_existing:
-        append_rules = """
-- An existing form ALREADY exists on the canvas. Emit ONLY the NEW section(s)
-  and fields inferred from THIS document. Do not recreate prior sections.
-- Prefer fresh section/field ids that will not collide with common names already
-  used (the server will rename collisions, but unique ids are better).
-- The server will APPEND your sections to the existing form; existing fields must
-  remain untouched.
-"""
+    append_rules = _doc_append_rules() if append_to_existing else ""
     return f"""\
 MODE: generate_from_document
 
-A document is ATTACHED to this request (you can read its text, layout, and any
-images/tables directly). The document may be a CERTIFICATE or an OUTPUT template,
-not the application form itself. Your task is to infer the APPLICATION FORM a
-citizen would fill in to obtain/produce this document -- NOT to transcribe the
-document.
+A document is ATTACHED (read its text, tables, and layout directly). Implement
+the form configuration it describes.
 
-Rules specific to this mode:
-- Follow the ADMIN INSTRUCTION below as the primary intent. The document is the
-  source content; the instruction tells you what to do with it.
-- Turn each piece of information the document requires into an input field.
-- Choose specialised field types where appropriate (dates -> date, phone -> phone,
-  Aadhaar -> aadhaar, PIN code -> pincode, supporting scans -> file).
-- Group related fields into sections (and subSections where it clarifies structure).
-- Do NOT copy issuing-authority text, signatures, or seals into fields.
-{append_rules}
+{_DOC_FIDELITY_RULES}{append_rules}
 ADMIN INSTRUCTION:
 \"\"\"
 {admin_instruction}
@@ -126,33 +187,14 @@ def build_doc_prompt_text_fallback(
         else DEFAULT_DOC_INSTRUCTION
     )
     admin_instruction = (instruction or "").strip() or default
-    append_rules = ""
-    if append_to_existing:
-        append_rules = """
-- An existing form ALREADY exists on the canvas. Emit ONLY the NEW section(s)
-  and fields inferred from THIS document. Do not recreate prior sections.
-- Prefer fresh section/field ids that will not collide with common names already
-  used (the server will rename collisions, but unique ids are better).
-- The server will APPEND your sections to the existing form; existing fields must
-  remain untouched.
-"""
+    append_rules = _doc_append_rules() if append_to_existing else ""
     return f"""\
 MODE: generate_from_document
 
-The text below was EXTRACTED from a document a citizen or department provided. The
-document may be a CERTIFICATE or an OUTPUT template, not the application form
-itself. Your task is to infer the APPLICATION FORM a citizen would fill in to
-obtain/produce this document -- NOT to transcribe the document.
+The text below was EXTRACTED from the uploaded document. Implement the form
+configuration it describes.
 
-Rules specific to this mode:
-- Follow the ADMIN INSTRUCTION below as the primary intent. The document text is
-  the source content; the instruction tells you what to do with it.
-- Turn each piece of information the document requires into an input field.
-- Choose specialised field types where appropriate (dates -> date, phone -> phone,
-  Aadhaar -> aadhaar, PIN code -> pincode, supporting scans -> file).
-- Group related fields into sections (and subSections where it clarifies structure).
-- Do NOT copy issuing-authority text, signatures, or seals into fields.
-{append_rules}
+{_DOC_FIDELITY_RULES}{append_rules}
 ADMIN INSTRUCTION:
 \"\"\"
 {admin_instruction}
@@ -163,6 +205,20 @@ EXTRACTED DOCUMENT TEXT:
 {extracted_text.strip()}
 \"\"\"
 """
+
+
+def _section_ids_hint(context: dict) -> str:
+    sections = context.get("sections") if isinstance(context, dict) else None
+    if not isinstance(sections, list):
+        return ""
+    ids = [str(s.get("id")) for s in sections if isinstance(s, dict) and s.get("id")]
+    if not ids:
+        return ""
+    return (
+        "\nEXISTING SECTION IDS (use these sectionId values for addField): "
+        + ", ".join(ids)
+        + "\n"
+    )
 
 
 def build_edit_prompt(
@@ -180,6 +236,7 @@ def build_edit_prompt(
     to it there. Reference fields by the ids shown in the context.
     """
     context_text = json.dumps(context, indent=2, ensure_ascii=False)
+    section_hint = _section_ids_hint(context)
     target_section = ""
     if target_field_ids:
         targets_list = "\n".join(f"- {tid}" for tid in target_field_ids)
@@ -212,6 +269,8 @@ SUPPORTED OPERATIONS (use only these):
   {{ "op": "addOption",      "fieldId": "<select_id>",
      "value": {{ "value": "<opt_value>", "label": {{ "en": "<text>" }} }} }},
   {{ "op": "removeOption",   "fieldId": "<select_id>", "optionValue": "<opt_value>" }},
+  {{ "op": "addSection",     "sectionId": "<new_section_id>",
+     "value": {{ "id": "<new_section_id>", "title": {{ "en": "<Section title>" }} }} }},
   {{ "op": "addField",       "sectionId": "<section_id>",
      "value": {{ "id": "<new_id>", "type": "<FieldType>", "label": {{ "en": "<text>" }} }} }},
   {{ "op": "removeField",    "fieldId": "<id>" }},
@@ -222,9 +281,10 @@ SUPPORTED OPERATIONS (use only these):
 ]
 
 RULES:
-- Every fieldId / tableId / sectionId MUST exist in the COMPACT VIEW below (a new
-  field created by addField, or a new column created by addColumn, are the only
-  exceptions).
+- Every fieldId / tableId / sectionId MUST exist in the COMPACT VIEW below, EXCEPT:
+  a brand-new section from addSection, a new field from addField, or a new column
+  from addColumn. For a NEW section, emit addSection BEFORE addField to that sectionId.
+  For extra fields in an EXISTING section, use that section's exact id from the list below.
 - Never invent operation names. There is no updateColumn / updateField /
   updateSection. To change a property, use setProp (field), setSectionProp
   (section), or setColumnProp (table column).
@@ -310,7 +370,7 @@ RULES:
 - Address ONLY what this instruction asks for — do not add transliteration or
   other features unless explicitly requested.
 - Output the JSON array ONLY. No markdown fences, no commentary.
-{target_section}
+{target_section}{section_hint}
 COMPACT VIEW OF THE FORM:
 \"\"\"
 {context_text}
@@ -339,8 +399,11 @@ MODE: repair
 
 Your previous output failed validation. Fix ONLY the listed problems and return
 the corrected result in the same format you produced before: {output_format}. Do
-not introduce new fields, do not re-emit untouched fields wholesale, and do not
-change anything unrelated to these errors. Output JSON only, no markdown fences.
+not change anything unrelated to these errors. Output JSON only, no markdown fences.
+
+When repairing a FULL FORM (not edit mode): keep the SAME number of sections and
+the SAME fields unless an error explicitly requires removing one invalid field.
+Never fix validation by dropping whole sections or summarizing the form.
 
 CHANGE-SET REPAIR HINTS (edit mode):
 - Allowed ops only: setProp, unsetProp, setSectionProp, unsetSectionProp,

@@ -21,6 +21,9 @@ from app.validation.result import Level, Severity, ValidationError
 #: The canonical id an `applying_for` field must use (plan singleton rule).
 APPLYING_FOR_ID = "applying_for_yourself"
 
+#: Static list controls whose option `value` must be integer (not string labels).
+_STATIC_INT_OPTION_TYPES = frozenset({"select", "multiselect", "radio"})
+
 
 def _err(
     code: str,
@@ -40,6 +43,7 @@ def validate_business(index: FormIndex) -> list[ValidationError]:
     errors: list[ValidationError] = []
     errors += _check_duplicate_ids(index)
     errors += _check_applying_for_singleton(index)
+    errors += _check_static_option_values_integer(index)
     errors += _check_dangling_references(index)
     return errors
 
@@ -59,7 +63,42 @@ def _check_duplicate_ids(index: FormIndex) -> list[ValidationError]:
     return out
 
 
-# --- 2. applying_for singleton ---------------------------------------------
+# --- 2. Static option values (integer) --------------------------------------
+
+
+def _check_static_option_values_integer(index: FormIndex) -> list[ValidationError]:
+    """Static select/radio/multiselect options use integer values (org / KB rule)."""
+    out: list[ValidationError] = []
+    for entry in index.fields.values():
+        node = entry.node
+        ftype = node.get("type")
+        if ftype not in _STATIC_INT_OPTION_TYPES:
+            continue
+        if node.get("datasource"):
+            continue
+        options = node.get("options")
+        if not isinstance(options, list):
+            continue
+        for i, opt in enumerate(options):
+            if not isinstance(opt, dict) or "value" not in opt:
+                continue
+            val = opt["value"]
+            if isinstance(val, bool):
+                continue
+            if not isinstance(val, int):
+                out.append(_err(
+                    "static_option_value_not_integer",
+                    (
+                        f"field '{entry.id}' option[{i}] value must be an integer "
+                        f"for static lists (use 1, 2, 3 — not strings like "
+                        f"'MALE'); got {val!r}"
+                    ),
+                    field_id=entry.id,
+                ))
+    return out
+
+
+# --- 3. applying_for singleton ---------------------------------------------
 
 
 def _check_applying_for_singleton(index: FormIndex) -> list[ValidationError]:

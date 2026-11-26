@@ -1,0 +1,52 @@
+{
+  "datasources": {
+    "GEO_UNIT": {
+      "endpoint": "/api/um/GeoUnit/GetGeoUnitDList",
+      "method": "POST",
+      "purpose": "State, district, tehsil, municipality, ward, block, patwar circle, gram panchayat and village cascades",
+      "parentParameter": "ApiParams.ParentId",
+      "geoTypeParameter": "ApiParams.GeoTypeId",
+      "dependencyRequired": true
+    },
+    "DOCUMENT_TYPES_BY_CATEGORY": {
+      "endpoint": "/api/dms/ServiceDoc/GetDocTypeListByCategoryList",
+      "method": "POST",
+      "purpose": "Identity, address, DOB and service document selection"
+    },
+    "CONFIG_REFERENCE_LIST": {
+      "endpoint": "/api/um/Config/GetConfigtDList",
+      "method": "POST",
+      "purpose": "Gender, salutation, religion, caste, licence and other reference lists",
+      "parameter": "ApiParams.RefType"
+    },
+    "RELATION_MAPPING": {
+      "endpoint": "/api/um/Config/GetRelationMappingList",
+      "method": "POST",
+      "purpose": "Relationship, gender and marital-status mappings"
+    },
+    "RELATION_LIST": {
+      "endpoint": "/api/publicservice/Config/GetConfigtDList",
+      "method": "POST",
+      "purpose": "Beneficiary/deceased/property relationship lists"
+    },
+    "PROFILE_MEMBERS": {
+      "endpoint": "/api/authentication/CitizenContoller/GetMemberDListByMobileNumber",
+      "method": "POST",
+      "purpose": "Existing family/profile member selection"
+    },
+    "OFFICE_LIST": {
+      "endpoint": "/api/um/Common/PostGetOfficeDList",
+      "method": "POST",
+      "purpose": "Health institutions, offices and service authorities"
+    }
+  },
+  "observed_usage": {
+    "GEO_UNIT": 8338,
+    "DOCUMENT_TYPES_BY_CATEGORY": 1006,
+    "CONFIG_REFERENCE_LIST": 964,
+    "RELATION_MAPPING": 632,
+    "RELATION_LIST": 358,
+    "PROFILE_MEMBERS": 279,
+    "OFFICE_LIST": 244
+  }
+}

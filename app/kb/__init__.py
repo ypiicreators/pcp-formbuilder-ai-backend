@@ -1,0 +1,1 @@
+"""AI Knowledge Base — Mongo-backed admin API."""

@@ -3,8 +3,9 @@ Document-mode orchestration — uploaded file -> whole form.
 
 This is the third generation path, alongside generate (description -> form) and
 edit (form + instruction -> change-set). Here the admin uploads a source document
-(a certificate, an existing paper form, an output template) and the LLM infers the
-APPLICATION FORM a citizen would fill in to produce/obtain it.
+(a field spec, requirement write-up, Word/PDF export, etc.) and the LLM builds
+Form Builder JSON for every section and field defined in that document — without
+summarizing or inventing a different form shape.
 
 Two input paths, chosen by file type:
 
@@ -47,10 +48,13 @@ from pathlib import Path
 from typing import Any, AsyncIterator
 
 from app.config import get_settings
+from app.core.doc_spec_parser import parse_field_spec_document
 from app.core.document_convert import (
     DocumentConversionError,
     extract_docx_text,
     is_docx,
+    is_pdf,
+    extract_pdf_text,
 )
 from app.core.form_merge import merge_generated_sections
 
@@ -149,6 +153,26 @@ async def run_document_flow(
         "docx_text" if prepared.extracted_text is not None else "attachment",
         append,
     )
+
+    if prepared.extracted_text is not None:
+        parsed_spec = parse_field_spec_document(prepared.extracted_text)
+        if parsed_spec:
+            logger.info(
+                "document_flow: spec enrich path sections=%d",
+                len(parsed_spec.sections),
+            )
+            from app.orchestration import spec_enrich_flow
+
+            return await spec_enrich_flow.run_spec_enrich_flow(
+                parsed_spec.sections,
+                provider,
+                instruction,
+                finalize=_finalize_document_result,
+                base_form=base_form,
+                max_repair_attempts=max_repair_attempts,
+                service_name=parsed_spec.service_name,
+                cross_field_validators=parsed_spec.cross_field_validators,
+            )
 
     system_prompt = get_system_prompt()
 
@@ -267,6 +291,28 @@ async def run_document_flow_stream(
     if prepared.error:
         yield ("error", [prepared.error])
         return
+
+    if prepared.extracted_text is not None:
+        parsed_spec = parse_field_spec_document(prepared.extracted_text)
+        if parsed_spec:
+            logger.info(
+                "document_flow(stream): spec enrich path sections=%d",
+                len(parsed_spec.sections),
+            )
+            from app.orchestration import spec_enrich_flow
+
+            async for event in spec_enrich_flow.run_spec_enrich_flow_stream(
+                parsed_spec.sections,
+                provider,
+                instruction,
+                finalize=_finalize_document_result,
+                base_form=base_form,
+                max_repair_attempts=max_repair_attempts,
+                service_name=parsed_spec.service_name,
+                cross_field_validators=parsed_spec.cross_field_validators,
+            ):
+                yield event
+            return
 
     # If streaming isn't supported, fall back to the non-streaming flow and
     # emit its result as a single terminal event (no deltas).
@@ -435,6 +481,21 @@ def prepare_document_upload(
             extracted_text=text,
             warnings=["Read the Word document by extracting its text and tables."],
         )
+
+    # PDF with a text layer: extract text so pipe-table specs use the fast path.
+    if is_pdf(filename, content_type):
+        try:
+            text = extract_pdf_text(file_bytes)
+        except DocumentConversionError:
+            pass
+        else:
+            if text.strip():
+                return _Prepared(
+                    extracted_text=text,
+                    warnings=[
+                        "Read the PDF by extracting its text (same path as Word specs)."
+                    ],
+                )
 
     # Native attachment path. Resolve the type, falling back to the extension.
     ctype = (content_type or "").split(";")[0].strip().lower()

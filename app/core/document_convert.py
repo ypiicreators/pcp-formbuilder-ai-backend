@@ -31,9 +31,21 @@ DOCX_CONTENT_TYPES = {
 #: sends a generic content type like application/octet-stream).
 DOCX_EXTENSIONS = {".docx"}
 
+PDF_CONTENT_TYPES = {"application/pdf"}
+PDF_EXTENSIONS = {".pdf"}
+
 
 class DocumentConversionError(Exception):
     """Raised when a Word document cannot be read / has no extractable text."""
+
+
+def is_pdf(filename: str | None, content_type: str | None) -> bool:
+    """True if this upload is a PDF."""
+    ctype = (content_type or "").split(";")[0].strip().lower()
+    if ctype in PDF_CONTENT_TYPES:
+        return True
+    ext = Path(filename or "").suffix.lower()
+    return ext in PDF_EXTENSIONS
 
 
 def is_docx(filename: str | None, content_type: str | None) -> bool:
@@ -119,5 +131,45 @@ def extract_docx_text(data: bytes) -> str:
         raise DocumentConversionError(
             "The Word document appears to contain no readable text (it may be "
             "image-only). Please upload it as a PDF instead."
+        )
+    return result
+
+
+def extract_pdf_text(data: bytes) -> str:
+    """
+    Extract text from a digital PDF (text layer). Used for the same pipe-table
+    spec fast path as DOCX. Falls back to native PDF attachment when extraction fails.
+    """
+    try:
+        import fitz  # PyMuPDF
+    except ImportError as exc:  # pragma: no cover
+        raise DocumentConversionError(
+            "PDF text extraction is not installed (missing pymupdf). "
+            "Upload DOCX or ask an administrator to install pymupdf."
+        ) from exc
+
+    try:
+        doc = fitz.open(stream=data, filetype="pdf")
+    except Exception as exc:
+        raise DocumentConversionError(
+            "Could not read the PDF — it may be corrupt or password-protected."
+        ) from exc
+
+    lines: list[str] = []
+    try:
+        for page in doc:
+            text = page.get_text("text") or ""
+            for raw in text.splitlines():
+                line = " ".join(raw.split())
+                if line:
+                    lines.append(line)
+    finally:
+        doc.close()
+
+    result = "\n".join(lines).strip()
+    if not result:
+        raise DocumentConversionError(
+            "The PDF has no extractable text (it may be scanned). "
+            "Use a text-based PDF or upload DOCX."
         )
     return result

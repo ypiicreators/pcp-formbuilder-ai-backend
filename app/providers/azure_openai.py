@@ -66,6 +66,8 @@ class AzureOpenAIProvider(LLMProvider):
         system_prompt: str,
         user_prompt: str,
         attachments: list[Attachment] | None = None,
+        *,
+        max_tokens: int | None = None,
     ) -> str:
         """Call the deployment and return clean JSON text."""
         payload: dict = {
@@ -74,7 +76,7 @@ class AzureOpenAIProvider(LLMProvider):
                 {"role": "user", "content": user_prompt},
             ],
             "temperature": self._temperature,
-            "max_tokens": self._max_tokens,
+            "max_tokens": max_tokens if max_tokens is not None else self._max_tokens,
         }
         # Native JSON mode: ask the model to emit a JSON object.
         if self.supports_json_mode:

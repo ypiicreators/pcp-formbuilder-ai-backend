@@ -28,6 +28,9 @@ from typing import Any
 
 from app.config import get_settings
 from app.core.change_set import _loads_tolerant  # fence-tolerant JSON parse
+from app.kb.binder import bind_kb_to_form
+from app.kb.loader import fetch_live_kb
+from app.kb.prompt import build_kb_prompt_block
 from app.prompts.system_prompt import get_system_prompt
 from app.prompts.user_prompts import build_nl_prompt, build_repair_prompt
 from app.providers.base import LLMError, LLMProvider
@@ -62,8 +65,13 @@ async def run_generate_flow(
     if max_repair_attempts is None:
         max_repair_attempts = get_settings().max_repair_attempts
 
+    kb_snapshot = await fetch_live_kb()
+    kb_block = build_kb_prompt_block(kb_snapshot, description, mode="generate")
+
     system_prompt = get_system_prompt()
     user_prompt = build_nl_prompt(description)
+    if kb_block:
+        user_prompt = f"{user_prompt}\n\n{kb_block}"
 
     # --- First LLM call ---------------------------------------------------
     try:
@@ -71,7 +79,7 @@ async def run_generate_flow(
     except LLMError as exc:
         return GenerateResult(status=GenerateStatus.FAILED, errors=[f"LLM call failed: {exc}"])
 
-    outcome = _parse_and_validate(raw)
+    outcome = _parse_and_validate(raw, kb_snapshot=kb_snapshot, user_text=description)
     if outcome.ok:
         return GenerateResult(
             status=GenerateStatus.PROPOSAL, form=outcome.form, warnings=outcome.warnings
@@ -90,7 +98,9 @@ async def run_generate_flow(
             return GenerateResult(
                 status=GenerateStatus.FAILED, errors=[f"LLM repair call failed: {exc}"]
             )
-        outcome = _parse_and_validate(last_raw)
+        outcome = _parse_and_validate(
+            last_raw, kb_snapshot=kb_snapshot, user_text=description
+        )
         if outcome.ok:
             return GenerateResult(
                 status=GenerateStatus.PROPOSAL, form=outcome.form, warnings=outcome.warnings
@@ -111,7 +121,12 @@ class _Outcome:
     errors: list[str] = dc_field(default_factory=list)
 
 
-def _parse_and_validate(raw: str) -> _Outcome:
+def _parse_and_validate(
+    raw: str,
+    *,
+    kb_snapshot: list | None = None,
+    user_text: str = "",
+) -> _Outcome:
     obj, err = _loads_tolerant(raw)
     if err:
         return _Outcome(ok=False, errors=[f"could not parse form JSON: {err}"])
@@ -119,10 +134,18 @@ def _parse_and_validate(raw: str) -> _Outcome:
         return _Outcome(ok=False, errors=["output must be a form object with a 'sections' array"])
 
     form = _strip_metadata(obj)
+    kb_warnings: list[str] = []
+    if kb_snapshot:
+        form, kb_warnings = bind_kb_to_form(form, kb_snapshot, user_text)
+
     result = validate_form(form)
     if not result.ok:
         return _Outcome(ok=False, errors=result.error_messages())
-    return _Outcome(ok=True, form=form, warnings=result.warning_messages())
+    return _Outcome(
+        ok=True,
+        form=form,
+        warnings=kb_warnings + result.warning_messages(),
+    )
 
 
 def _strip_metadata(form: dict[str, Any]) -> dict[str, Any]:

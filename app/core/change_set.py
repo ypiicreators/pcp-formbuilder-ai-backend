@@ -48,6 +48,7 @@ class OpType(str, Enum):
     UNSET_COLUMN_PROP = "unsetColumnProp"  # remove a property from a table column
     ADD_OPTION = "addOption"       # append an option to a select/radio field
     REMOVE_OPTION = "removeOption" # remove an option (by value) from a field
+    ADD_SECTION = "addSection"     # append a new section to the form
     ADD_FIELD = "addField"         # add a new field to a section
     REMOVE_FIELD = "removeField"   # remove an existing field
     ADD_COLUMN = "addColumn"       # append a column to a table / computed_table / verification
@@ -268,6 +269,17 @@ def _parse_one(op_type: OpType, raw: dict, i: int) -> tuple[Op | None, str]:
             return None, f"op[{i}] removeOption requires string 'optionValue'"
         return Op(type=op_type, field_id=fid, option_value=ov, raw=raw), ""
 
+    if op_type is OpType.ADD_SECTION:
+        sec = raw.get("sectionId", "")
+        val = raw.get("value")
+        if isinstance(val, dict) and val.get("id") and not sec:
+            sec = str(val["id"])
+        if not sec:
+            return None, f"op[{i}] addSection requires 'sectionId'"
+        if not isinstance(val, dict):
+            val = {"id": sec, "title": {"en": sec.replace("_", " ").title()}}
+        return Op(type=op_type, section_id=str(sec), value=val, raw=raw), ""
+
     if op_type is OpType.ADD_FIELD:
         sec = raw.get("sectionId", "")
         newf = raw.get("value")
@@ -322,15 +334,28 @@ def apply_change_set(form: dict[str, Any], ops: list[Op]) -> ApplyResult:
     # before mutating. addField / addColumn ids are excluded from the
     # "must exist" check so later setColumnProp can target a column added
     # in the same change-set.
+    _normalize_section_ids(working, ops)
+
     index = build_index(working)
     pending_new_ids = {op.field_id for op in ops if op.type is OpType.ADD_FIELD}
     pending_new_columns = {
         (op.table_id, op.field_id) for op in ops if op.type is OpType.ADD_COLUMN
     }
+    pending_new_sections = {op.section_id for op in ops if op.type is OpType.ADD_SECTION}
+    section_add_counts: dict[str, int] = {}
+    for op in ops:
+        if op.type is OpType.ADD_SECTION:
+            section_add_counts[op.section_id] = section_add_counts.get(op.section_id, 0) + 1
 
     for op in ops:
         err = _validate_op_targets(
-            op, index, working, pending_new_ids, pending_new_columns
+            op,
+            index,
+            working,
+            pending_new_ids,
+            pending_new_columns,
+            pending_new_sections,
+            section_add_counts,
         )
         if err:
             errors.append(err)
@@ -344,13 +369,19 @@ def apply_change_set(form: dict[str, Any], ops: list[Op]) -> ApplyResult:
             changed_id = _apply_one(op, working)
             if changed_id:
                 applied.append(changed_id)
-            if op.type in (OpType.ADD_FIELD, OpType.REMOVE_FIELD,
-                           OpType.ADD_COLUMN, OpType.REMOVE_COLUMN):
+            if op.type in (
+                OpType.ADD_SECTION,
+                OpType.ADD_FIELD,
+                OpType.REMOVE_FIELD,
+                OpType.ADD_COLUMN,
+                OpType.REMOVE_COLUMN,
+            ):
                 index = build_index(working)
         except Exception as exc:  # defensive: never leak a half-applied form
+            target = op.field_id or op.section_id or op.table_id
             return ApplyResult(
                 form=form,
-                errors=[f"failed applying {op.type.value} on '{op.field_id}': {exc}"],
+                errors=[f"failed applying {op.type.value} on '{target}': {exc}"],
             )
 
     return ApplyResult(form=working, applied_field_ids=applied)
@@ -362,9 +393,13 @@ def _validate_op_targets(
     form: dict,
     pending_new_ids: set,
     pending_new_columns: set | None = None,
+    pending_new_sections: set | None = None,
+    section_add_counts: dict[str, int] | None = None,
 ) -> str:
     """Check that an op's target ids resolve in the current form."""
     pending_new_columns = pending_new_columns or set()
+    pending_new_sections = pending_new_sections or set()
+    section_add_counts = section_add_counts or {}
 
     if op.type in (OpType.SET_PROP, OpType.UNSET_PROP, OpType.REMOVE_FIELD,
                    OpType.ADD_OPTION, OpType.REMOVE_OPTION):
@@ -376,6 +411,13 @@ def _validate_op_targets(
         if entry and entry.node.get("type") not in ("select", "multiselect", "radio"):
             return f"{op.type.value} field '{op.field_id}' is not an option-bearing type"
 
+    if op.type is OpType.ADD_SECTION:
+        if _find_section(form, op.section_id):
+            return f"addSection section '{op.section_id}' already exists"
+        if section_add_counts.get(op.section_id, 0) > 1:
+            return f"addSection section '{op.section_id}' duplicated in change-set"
+        return ""
+
     if op.type in (OpType.SET_COLUMN_PROP, OpType.UNSET_COLUMN_PROP,
                    OpType.REMOVE_COLUMN):
         if (op.table_id, op.field_id) in pending_new_columns:
@@ -385,13 +427,18 @@ def _validate_op_targets(
                     f"'{op.table_id}.{op.field_id}'")
 
     if op.type in (OpType.SET_SECTION_PROP, OpType.UNSET_SECTION_PROP):
-        if not _find_section(form, op.section_id):
+        if not _find_section(form, op.section_id) and op.section_id not in pending_new_sections:
             return f"{op.type.value} targets unknown section '{op.section_id}'"
 
     if op.type is OpType.ADD_FIELD:
-        # Section must exist; new id must not collide with an existing one.
-        if not _find_section(form, op.section_id):
-            return f"addField targets unknown section '{op.section_id}'"
+        if (
+            not _find_section(form, op.section_id)
+            and op.section_id not in pending_new_sections
+        ):
+            return (
+                f"addField targets unknown section '{op.section_id}'. "
+                "Use an existing sectionId from the compact view or addSection first."
+            )
         existing = index.all_field_ids() | (pending_new_ids - {op.field_id})
         if op.field_id in existing:
             return f"addField id '{op.field_id}' already exists"
@@ -430,6 +477,21 @@ def _apply_one(op: Op, form: dict) -> str:
         section = _find_section(form, op.section_id)
         section.pop(op.property, None)
         return op.section_id
+    if op.type is OpType.ADD_SECTION:
+        val = op.value if isinstance(op.value, dict) else {}
+        sec_id = op.section_id or str(val.get("id") or "")
+        title = val.get("title")
+        if not isinstance(title, dict):
+            title = {"en": str(title or sec_id.replace("_", " ").title())}
+        form.setdefault("sections", []).append(
+            {
+                "id": sec_id,
+                "title": title,
+                "fields": val.get("fields") if isinstance(val.get("fields"), list) else [],
+            }
+        )
+        return sec_id
+
 
     if op.type is OpType.SET_COLUMN_PROP:
         index.get_column(op.table_id, op.field_id).node[op.property] = op.value
@@ -492,6 +554,44 @@ def _section_snapshot(section: dict[str, Any] | None) -> dict[str, Any] | None:
         for k, v in section.items()
         if k not in _SECTION_DIFF_SKIP
     }
+
+
+def _resolve_section_id(form: dict, requested: str) -> str | None:
+    """Map invented section ids (e.g. 'address') to an existing section when obvious."""
+    if not requested:
+        return None
+    if _find_section(form, requested):
+        return requested
+    sections = [s for s in form.get("sections", []) if isinstance(s, dict)]
+    req = requested.lower().replace("_", " ").strip()
+    req_id = requested.lower().replace(" ", "_")
+    for sec in sections:
+        sid = str(sec.get("id", ""))
+        if sid.lower() == req_id:
+            return sid
+    for sec in sections:
+        title = ((sec.get("title") or {}).get("en") or "").lower()
+        if req in title or (len(req) > 3 and req in title.replace(" ", "")):
+            return sec.get("id")
+    for sec in sections:
+        sid = str(sec.get("id", "")).lower()
+        if req_id in sid or sid in req_id:
+            return sec.get("id")
+    if len(sections) == 1:
+        only = sections[0].get("id")
+        if isinstance(only, str) and only:
+            return only
+    return None
+
+
+def _normalize_section_ids(form: dict, ops: list[Op]) -> None:
+    for op in ops:
+        if op.type in (OpType.ADD_FIELD, OpType.SET_SECTION_PROP, OpType.UNSET_SECTION_PROP):
+            resolved = _resolve_section_id(form, op.section_id)
+            if resolved:
+                op.section_id = resolved
+
+
 
 
 def _unknown_op_error(i: int, op_name: Any) -> str:

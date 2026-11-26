@@ -53,6 +53,20 @@ class Settings(BaseSettings):
     anthropic_base_url: str = "https://api.anthropic.com"
     anthropic_max_tokens: int = 8000
 
+    # --- MongoDB (KB store) -------------------------------------------------
+    # Empty MONGO_URI = Mongo disabled; the app still runs, KB features stay off.
+    mongo_uri: str = ""
+    mongo_db: str = "pcp_form_ai"
+    mongo_server_selection_timeout_ms: int = 5000
+    # When true, the first KB API call seeds starter entries if no release exists.
+    kb_seed_on_empty: bool = True
+
+    # Higher cap for one-shot spec enrich (skeleton + dependencies) only.
+    doc_spec_enrich_max_tokens: int = 24000
+
+    # Stream enrich then parse often duplicates a full generate on failure — off by default.
+    doc_spec_enrich_use_stream: bool = False
+
     # --- CORS --------------------------------------------------------------
     # Comma-separated list of allowed origins (mirrors the extractor service).
     # Origins must NOT include a trailing slash — browsers send Origin without one.

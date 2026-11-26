@@ -82,9 +82,13 @@ class AnthropicProvider(LLMProvider):
         system_prompt: str,
         user_prompt: str,
         attachments: list[Attachment] | None = None,
+        *,
+        max_tokens: int | None = None,
     ) -> str:
         """Call the Messages API and return clean JSON text."""
-        payload = self._build_payload(system_prompt, user_prompt, attachments)
+        payload = self._build_payload(
+            system_prompt, user_prompt, attachments, max_tokens=max_tokens
+        )
         headers = self._build_headers()
 
         started = time.monotonic()
@@ -109,6 +113,8 @@ class AnthropicProvider(LLMProvider):
         system_prompt: str,
         user_prompt: str,
         attachments: list[Attachment] | None = None,
+        *,
+        max_tokens: int | None = None,
     ):
         """
         Stream the Messages API response, yielding raw text fragments as they
@@ -125,7 +131,9 @@ class AnthropicProvider(LLMProvider):
         flow / route) surfaces a stream error instead. The non-streaming
         `generate()` still has retry for the edit/generate paths.
         """
-        payload = self._build_payload(system_prompt, user_prompt, attachments)
+        payload = self._build_payload(
+            system_prompt, user_prompt, attachments, max_tokens=max_tokens
+        )
         payload["stream"] = True
         headers = self._build_headers()
 
@@ -192,6 +200,8 @@ class AnthropicProvider(LLMProvider):
         system_prompt: str,
         user_prompt: str,
         attachments: list[Attachment] | None,
+        *,
+        max_tokens: int | None = None,
     ) -> dict:
         """Assemble the Messages API request body (shared by both call paths)."""
         # With no attachments the content is a plain string (text-only edit/
@@ -206,7 +216,7 @@ class AnthropicProvider(LLMProvider):
 
         payload: dict = {
             "model": self._model,
-            "max_tokens": self._max_tokens,
+            "max_tokens": max_tokens if max_tokens is not None else self._max_tokens,
             # Anthropic takes `system` as a top-level field, not a message.
             "system": system_prompt,
             "messages": [
@@ -260,8 +270,8 @@ class AnthropicProvider(LLMProvider):
         image -> {"type": "image",    "source": {base64}}   (read natively)
         text  -> {"type": "text", "text": "..."}            (inlined verbatim)
 
-        DOCX/XLSX are NOT accepted here — the orchestration layer converts a
-        DOCX to PDF before it reaches the provider (see document_flow).
+        DOCX/XLSX are NOT accepted here — the orchestration layer extracts DOCX
+        text before it reaches the provider (see document_flow).
         """
         ctype = (att.content_type or "").split(";")[0].strip().lower()
 

@@ -246,3 +246,4 @@ class HealthResponse(BaseModel):
     app: str
     version: str
     provider: str
+    mongo: str = "disabled"  # "ok" | "down" | "disabled" (no MONGO_URI)

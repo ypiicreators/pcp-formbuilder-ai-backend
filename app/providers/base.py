@@ -59,6 +59,8 @@ class LLMProvider(ABC):
         system_prompt: str,
         user_prompt: str,
         attachments: list[Attachment] | None = None,
+        *,
+        max_tokens: int | None = None,
     ) -> str:
         """
         Send the prompts to the model and return clean JSON text.

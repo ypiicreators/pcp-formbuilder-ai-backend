@@ -5,8 +5,9 @@ UNIFIED CHAT ENTRY (current): POST /api/form-ai/assist is the single endpoint th
 frontend chat uses for text. It infers the mode from the request:
   - base_json ABSENT  -> GENERATE a new form from the prompt (first message)
   - base_json PRESENT -> EDIT that form with the prompt (every later message)
-Document uploads use /form-ai/assist-document(-stream). When those receive
-base_json, newly inferred sections are APPENDED onto the existing form.
+Document uploads use /form-ai/assist-document(-stream). The model implements
+sections/fields defined in the file. When base_json is sent, new sections from
+the document are APPENDED onto the existing form.
 
 The older per-mode endpoints (/generate multipart, /generate-nl, /edit) are
 COMMENTED OUT below — kept for reference, superseded by /assist. The underlying
@@ -24,6 +25,7 @@ from fastapi.responses import StreamingResponse
 
 from app.config import get_settings
 from app.core.generate_prompt_gate import assess_generate_prompt_sufficiency
+from app.db import mongo
 from app.models.schemas import (
     AssistRequest,
     ClarificationResponse,
@@ -69,10 +71,15 @@ router = APIRouter()
 async def health() -> HealthResponse:
     """Liveness check: confirms the server booted and reports the active provider."""
     settings = get_settings()
+    if not mongo.is_configured():
+        mongo_status = "disabled"
+    else:
+        mongo_status = "ok" if await mongo.is_connected() else "down"
     return HealthResponse(
         app=settings.app_name,
         version=settings.app_version,
         provider=settings.llm_provider,
+        mongo=mongo_status,
     )
 
 
@@ -133,13 +140,13 @@ async def assist_document(
     """
     Document-mode entry (multipart/form-data).
 
-    The admin uploads a source document (certificate, existing form, output
-    template) and the AI infers the application form a citizen would fill in to
-    produce/obtain it. PDFs/images/text go straight to the model; DOCX is
-    converted to PDF server-side first.
+    The admin uploads a document that defines form sections and fields; the AI
+    implements that structure as Form Builder JSON (no summarization). PDFs,
+    images, and plain text are sent as attachments; DOCX is extracted to text
+    server-side first.
 
-    When `base_json` is sent (a form already on the canvas), newly inferred
-    sections are appended onto that form so earlier sections/fields are kept.
+    When `base_json` is sent (a form already on the canvas), sections from this
+    document are appended onto that form so earlier sections/fields are kept.
 
     Kept separate from /form-ai/assist because that endpoint carries a JSON body
     (a form object), while this one carries a binary upload — two different
@@ -238,6 +245,12 @@ async def assist_document_stream(
             ):
                 if event == "delta":
                     yield _sse({"type": "delta", "text": payload})
+                elif event == "progress":
+                    yield _sse(
+                        {"type": "progress", **(payload if isinstance(payload, dict) else {})}
+                    )
+                elif event == "partial":
+                    yield _sse({"type": "partial", "form": payload})
                 elif event == "done":
                     yield _sse({"type": "done", "form": payload})
                 elif event == "error":

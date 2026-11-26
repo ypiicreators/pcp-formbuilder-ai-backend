@@ -1,0 +1,82 @@
+---
+description: Digi Punjab AI Form Builder domain rules
+globs: ["**/*form*", "**/*schema*", "**/form-builder/**", "**/validation/**"]
+alwaysApply: true
+---
+
+# Digi Punjab Form Builder rules
+
+Before changing form-builder code or schemas, read:
+
+- `docs/form-builder/business_patterns.json`
+- `docs/form-builder/validation-profiles.json`
+- `docs/form-builder/datasource-registry.json`
+- `docs/form-builder/README.md`
+
+## Operating model
+
+Reason in business modules first and compile to the existing JSON schema last. Prefer reusable modules such as:
+
+- applicant identity
+- self/beneficiary routing
+- beneficiary identity
+- family and parent details
+- permanent/correspondence address
+- Punjab geography cascade
+- Aadhaar/eKYC
+- profile/OCR autofill
+- service eligibility
+- document requirements
+- correction workflow
+- declaration and consent
+
+## Contract safety
+
+- Treat field IDs as backend contract keys.
+- Never rename, delete or change the meaning of an existing field ID without an explicit migration plan.
+- Do not infer a renderer only from a field ID; the same semantic ID can be text, select, phone, concatenate or another type in different services.
+- Preserve datasource endpoint, method, payload shape and response mappings unless the task explicitly changes the integration contract.
+- Keep original and corrected values separate in correction workflows.
+
+## Rule generation
+
+- Requiredness is evaluated after visibility and dependency resolution.
+- Hidden branch values must be cleared or excluded from submission.
+- A cascading select must declare its parent dependency and reset descendants when the parent changes.
+- Address copying is one logical group: copy all address, geography and PIN fields together.
+- Profile, Aadhaar and OCR autofill must declare source, precedence, lock behaviour and manual-override policy.
+- Use canonical validation profiles instead of inventing ad hoc regexes.
+- Cross-field rules must be expressed in a structured, testable representation where possible.
+
+## Required checks before completion
+
+Run the relevant lint and schema tests. Verify:
+
+- no broken field references
+- no duplicate global IDs
+- no dependency cycles
+- no invalid min/max or date relationships
+- no choice field without options or an approved datasource
+- no upload field without type, size and count policy
+- no transliteration target without a valid paired field
+- no required visible branch that leaves stale hidden values
+- no change to API contracts without a migration note
+
+## Response format for implementation tasks
+
+Before editing, state:
+
+1. Which business module is being changed.
+2. Which observed corpus pattern supports the change.
+3. Which existing IDs and APIs are affected.
+4. Which rules and tests will be added.
+
+After editing, report:
+
+- files changed
+- business behaviour implemented
+- validation and dependency rules
+- tests run
+- any assumptions or migration risks
+
+Never treat raw schema repetition as proof that a rule is legally required. Distinguish observed implementation patterns from inferred or recommended business rules.

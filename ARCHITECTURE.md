@@ -419,7 +419,7 @@ flowchart LR
         A1["Text description<br/>= the instruction"] --> A2["→ full form"]
     end
     subgraph ModeB["Upload (generate_doc)"]
-        B1["PDF/DOCX + optional instruction"] --> B2["infer application form<br/>(not transcribe)"]
+        B1["PDF/DOCX + optional instruction"] --> B2["implement sections/fields<br/>defined in document"]
     end
     subgraph ModeC["Edit JSON (edit_json)"]
         C1["existing JSON + required instruction"] --> C2["ID-anchored change-set<br/>→ applied → diff"]
