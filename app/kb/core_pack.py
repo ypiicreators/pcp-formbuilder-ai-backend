@@ -463,6 +463,24 @@ APIS: list[KbCreateInput] = [
 
 TEMPLATES: list[KbCreateInput] = [
     _entry(
+        "std.applying_for_yourself",
+        KbKind.template,
+        'Applying for yourself (fixed id)',
+        'The single "Are you applying for yourself?" control: type applying_for, '
+        'id exactly applying_for_yourself, options YES / NO. A template with an "id" '
+        "pins the field id wherever the form is generated from a document.",
+        ["applying for yourself", "applying for self", "apply for yourself"],
+        # No field-type filter on purpose: a source document may call it "radio".
+        payload={
+            "id": "applying_for_yourself",
+            "type": "applying_for",
+            "options": [
+                {"value": "YES", "label": {"en": "Yes"}},
+                {"value": "NO", "label": {"en": "No"}},
+            ],
+        },
+    ),
+    _entry(
         "std.pincode",
         KbKind.template,
         "PIN code (INDIA_PINCODE)",

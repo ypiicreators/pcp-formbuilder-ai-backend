@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+import re
 from typing import Any
 
 MODE_MAP = {
@@ -58,6 +60,14 @@ def select_kb_entries(
     return selected
 
 
+_PLACEHOLDER_RE = re.compile(r"\{([a-z_]+)\}")
+
+
+def payload_roles(entry: dict[str, Any]) -> set[str]:
+    """Parent-field roles an entry's payload depends on, e.g. {"state"} for {state}."""
+    return set(_PLACEHOLDER_RE.findall(json.dumps(entry.get("payload") or {})))
+
+
 def field_text(field: dict[str, Any]) -> str:
     label = field.get("label") or {}
     en = label.get("en") if isinstance(label, dict) else str(label)
@@ -88,6 +98,10 @@ def field_matches_entry(
     # not merely because the user prompt mentioned the keyword (that would attach
     # e.g. the district API to state + district when the prompt says "district").
     if entry.get("kind") in ("api_endpoint", "template"):
+        # A parent role (e.g. "state" in {state}) names the field the list depends on,
+        # not the field the list is for. Matching on it binds the district list to the
+        # State field itself (and to "State of Origin").
+        keywords = [k for k in keywords if k not in payload_roles(entry)]
         if keywords and any(k in hay for k in keywords if k):
             return True
         if key_bits and key_bits in hay:

@@ -4,9 +4,10 @@ Deterministic Form Builder skeleton from a parsed numbered field spec (0 LLM tok
 
 from __future__ import annotations
 
+import copy
 import json
 import re
-from typing import Any
+from typing import Any, Callable
 
 from app.core.doc_spec_parser import SpecCrossFieldValidator, SpecSection
 from app.prompts.constants import ALLOWED_FIELD_TYPES
@@ -114,11 +115,16 @@ def build_spec_skeleton(
     *,
     service_name: str | None = None,
     cross_field_validators: list[SpecCrossFieldValidator] | None = None,
+    identity: Callable[[str, str], dict[str, Any] | None] | None = None,
 ) -> tuple[dict[str, Any], list[dict[str, str]], list[str]]:
     """
     Returns (form, dependency_manifest, warnings).
 
     dependency_manifest entries: sectionId, fieldId, dependency (for enrich prompt).
+
+    `identity(label, type)` may return a KB template payload ({"id", "type", "options"})
+    that pins a field's canonical id/type, so the model, dependency text and validators
+    all work with the KB id from the start.
     """
     used_ids: set[str] = set()
     warnings: list[str] = []
@@ -132,8 +138,18 @@ def build_spec_skeleton(
         pending_punjabi: list[tuple[str, dict[str, Any]]] = []
 
         for row in sec.fields:
-            fid = _unique_id(slugify(row.name), used_ids)
             ftype = normalize_field_type(row.field_type)
+            pinned = identity(row.name, ftype) if identity else None
+            if pinned:
+                wanted = str(pinned["id"]).strip()
+                fid = _unique_id(wanted, used_ids)
+                ftype = normalize_field_type(str(pinned.get("type") or ftype))
+                note = f"KB identity: '{row.name}' -> id '{fid}', type '{ftype}'."
+                if fid != wanted:
+                    note += f" (id '{wanted}' was already taken)"
+                warnings.append(note)
+            else:
+                fid = _unique_id(slugify(row.name), used_ids)
             if ftype == "text" and row.field_type.strip().lower() not in _ALLOWED:
                 warnings.append(
                     f"Mapped unknown type '{row.field_type}' on '{row.name}' to text."
@@ -151,7 +167,9 @@ def build_spec_skeleton(
             elif required is False:
                 field["required"] = False
 
-            if ftype in _TYPES_NEEDING_OPTIONS:
+            if pinned and isinstance(pinned.get("options"), list) and pinned["options"]:
+                field["options"] = copy.deepcopy(pinned["options"])
+            elif ftype in _TYPES_NEEDING_OPTIONS:
                 field["options"] = _default_options_for_field(row.name, ftype)
 
             fields_out.append(field)

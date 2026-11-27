@@ -57,6 +57,11 @@ from app.core.document_convert import (
     extract_pdf_text,
 )
 from app.core.form_merge import merge_generated_sections
+from app.core.doc_trace import ensure_trace, stage
+from app.kb.binder import bind_kb_to_form
+from app.kb.identity import apply_kb_field_ids, form_field_ids, identity_entries
+from app.kb.loader import fetch_live_kb
+from app.kb.prompt import KbPromptContext, build_kb_prompt_block
 
 # Reuse the exact generate-mode tail so the output contract stays identical.
 from app.orchestration.generate_flow import (
@@ -143,10 +148,17 @@ async def run_document_flow(
     append = base_form is not None
 
     # --- Prepare the input (DOCX->text, or native attachment) -------------
+    ensure_trace(logger, "document_flow", file=filename, bytes=len(file_bytes))
     prep_started = time.monotonic()
-    prepared = prepare_document_upload(file_bytes, filename, content_type)
+    prepared = _prepare_traced(file_bytes, filename, content_type)
     if prepared.error:
+        logger.error("document_flow: upload rejected: %s", prepared.error)
         return GenerateResult(status=GenerateStatus.FAILED, errors=[prepared.error])
+
+    kb_snapshot, kb_block, kb_ctx = await _load_kb_traced(instruction, prepared)
+    finalize = _timed_finalize(
+        _kb_bound_finalize(_finalize_document_result, kb_snapshot, instruction)
+    )
     logger.info(
         "document_flow: prepare took=%.2fs path=%s append=%s",
         time.monotonic() - prep_started,
@@ -155,7 +167,7 @@ async def run_document_flow(
     )
 
     if prepared.extracted_text is not None:
-        parsed_spec = parse_field_spec_document(prepared.extracted_text)
+        parsed_spec = _parse_spec_traced(prepared.extracted_text)
         if parsed_spec:
             logger.info(
                 "document_flow: spec enrich path sections=%d",
@@ -167,19 +179,23 @@ async def run_document_flow(
                 parsed_spec.sections,
                 provider,
                 instruction,
-                finalize=_finalize_document_result,
+                finalize=finalize,
                 base_form=base_form,
                 max_repair_attempts=max_repair_attempts,
                 service_name=parsed_spec.service_name,
                 cross_field_validators=parsed_spec.cross_field_validators,
+                kb=kb_ctx,
             )
 
     system_prompt = get_system_prompt()
 
     # DOCX text path: no attachment, prompt carries the extracted text.
     if prepared.extracted_text is not None:
-        user_prompt = build_doc_prompt_text_fallback(
-            instruction, prepared.extracted_text, append_to_existing=append
+        user_prompt = _with_kb(
+            build_doc_prompt_text_fallback(
+                instruction, prepared.extracted_text, append_to_existing=append
+            ),
+            kb_block,
         )
         attachments: list[Attachment] | None = None
     else:
@@ -194,7 +210,9 @@ async def run_document_flow(
                 ],
             )
         assert prepared.attachment is not None  # guaranteed when no error/text
-        user_prompt = build_doc_prompt(instruction, append_to_existing=append)
+        user_prompt = _with_kb(
+            build_doc_prompt(instruction, append_to_existing=append), kb_block
+        )
         attachments = [prepared.attachment]
 
     # --- First LLM call: sends the file/text ------------------------------
@@ -209,7 +227,7 @@ async def run_document_flow(
             "document_flow: SUCCESS on first call, no repairs, total=%.1fs",
             time.monotonic() - flow_started,
         )
-        return _finalize_document_result(
+        return finalize(
             outcome.form, prepared.warnings + outcome.warnings, base_form
         )
 
@@ -227,7 +245,9 @@ async def run_document_flow(
     last_raw = raw
     while attempts < max_repair_attempts:
         attempts += 1
-        repair_prompt = build_repair_prompt(last_raw, last_errors, is_edit_mode=False)
+        repair_prompt = _with_kb(
+            build_repair_prompt(last_raw, last_errors, is_edit_mode=False), kb_block
+        )
         try:
             last_raw = await provider.generate(system_prompt, repair_prompt)
         except LLMError as exc:
@@ -241,7 +261,7 @@ async def run_document_flow(
                 attempts,
                 time.monotonic() - flow_started,
             )
-            return _finalize_document_result(
+            return finalize(
                 outcome.form, prepared.warnings + outcome.warnings, base_form
             )
         last_errors = outcome.errors
@@ -287,13 +307,20 @@ async def run_document_flow_stream(
     append = base_form is not None
 
     # --- Prepare input ----------------------------------------------------
-    prepared = prepare_document_upload(file_bytes, filename, content_type)
+    ensure_trace(logger, "document_flow(stream)", file=filename, bytes=len(file_bytes))
+    prepared = _prepare_traced(file_bytes, filename, content_type)
     if prepared.error:
+        logger.error("document_flow(stream): upload rejected: %s", prepared.error)
         yield ("error", [prepared.error])
         return
 
+    kb_snapshot, kb_block, kb_ctx = await _load_kb_traced(instruction, prepared)
+    finalize = _timed_finalize(
+        _kb_bound_finalize(_finalize_document_result, kb_snapshot, instruction)
+    )
+
     if prepared.extracted_text is not None:
-        parsed_spec = parse_field_spec_document(prepared.extracted_text)
+        parsed_spec = _parse_spec_traced(prepared.extracted_text)
         if parsed_spec:
             logger.info(
                 "document_flow(stream): spec enrich path sections=%d",
@@ -305,11 +332,12 @@ async def run_document_flow_stream(
                 parsed_spec.sections,
                 provider,
                 instruction,
-                finalize=_finalize_document_result,
+                finalize=finalize,
                 base_form=base_form,
                 max_repair_attempts=max_repair_attempts,
                 service_name=parsed_spec.service_name,
                 cross_field_validators=parsed_spec.cross_field_validators,
+                kb=kb_ctx,
             ):
                 yield event
             return
@@ -331,8 +359,11 @@ async def run_document_flow_stream(
     system_prompt = get_system_prompt()
 
     if prepared.extracted_text is not None:
-        user_prompt = build_doc_prompt_text_fallback(
-            instruction, prepared.extracted_text, append_to_existing=append
+        user_prompt = _with_kb(
+            build_doc_prompt_text_fallback(
+                instruction, prepared.extracted_text, append_to_existing=append
+            ),
+            kb_block,
         )
         attachments: list[Attachment] | None = None
     else:
@@ -347,7 +378,9 @@ async def run_document_flow_stream(
             )
             return
         assert prepared.attachment is not None
-        user_prompt = build_doc_prompt(instruction, append_to_existing=append)
+        user_prompt = _with_kb(
+            build_doc_prompt(instruction, append_to_existing=append), kb_block
+        )
         attachments = [prepared.attachment]
 
     # --- First call: STREAM, accumulating the full text -------------------
@@ -369,7 +402,7 @@ async def run_document_flow_stream(
             "document_flow(stream): SUCCESS on first call, total=%.1fs",
             time.monotonic() - flow_started,
         )
-        finalized = _finalize_document_result(
+        finalized = finalize(
             outcome.form, prepared.warnings + outcome.warnings, base_form
         )
         if finalized.status is GenerateStatus.FAILED:
@@ -391,7 +424,9 @@ async def run_document_flow_stream(
     last_raw = raw
     while attempts < max_repair_attempts:
         attempts += 1
-        repair_prompt = build_repair_prompt(last_raw, last_errors, is_edit_mode=False)
+        repair_prompt = _with_kb(
+            build_repair_prompt(last_raw, last_errors, is_edit_mode=False), kb_block
+        )
         try:
             last_raw = await provider.generate(system_prompt, repair_prompt)
         except LLMError as exc:
@@ -404,7 +439,7 @@ async def run_document_flow_stream(
                 attempts,
                 time.monotonic() - flow_started,
             )
-            finalized = _finalize_document_result(
+            finalized = finalize(
                 outcome.form, prepared.warnings + outcome.warnings, base_form
             )
             if finalized.status is GenerateStatus.FAILED:
@@ -420,6 +455,117 @@ async def run_document_flow_stream(
         time.monotonic() - flow_started,
     )
     yield ("error", last_errors)
+
+
+def _prepare_traced(file_bytes: bytes, filename: str, content_type: str | None) -> _Prepared:
+    with stage(logger, "prepare_upload", file=filename, bytes=len(file_bytes)) as st:
+        prepared = prepare_document_upload(file_bytes, filename, content_type)
+        st["path"] = (
+            "rejected"
+            if prepared.error
+            else "docx_text"
+            if prepared.extracted_text is not None
+            else "attachment"
+        )
+        st["text_chars"] = len(prepared.extracted_text or "")
+        if prepared.error:
+            st["error"] = prepared.error
+        return prepared
+
+
+async def _load_kb_traced(instruction: str | None, prepared: _Prepared):
+    """Fetch the live KB and build the prompt block/context, logging what was picked."""
+    with stage(logger, "kb_load") as st:
+        kb_snapshot = await fetch_live_kb()
+        kb_block = build_kb_prompt_block(
+            kb_snapshot,
+            "\n".join(t for t in (instruction, prepared.extracted_text) if t),
+            mode="document",
+        )
+        st["entries"] = len(kb_snapshot)
+        st["prompt_block_chars"] = len(kb_block)
+        pinned = identity_entries(kb_snapshot)
+        st["identity_fields"] = [e["payload"]["id"] for e in pinned]
+        if pinned:
+            logger.info(
+                "document_flow: KB identity fields: %s",
+                ", ".join(f'{e["payload"]["id"]} ({e["payload"].get("type")}) from {e["key"]}' for e in pinned),
+            )
+        else:
+            logger.warning(
+                "document_flow: KB has no identity fields (no template payload.id and no "
+                "policy body declaring e.g. applying_for_yourself: type applying_for) — "
+                "document types like 'radio' will be kept as-is"
+            )
+        if not kb_snapshot:
+            logger.warning(
+                "document_flow: KB is EMPTY for this run - KB policies, datasources and fixed "
+                "field ids will NOT be applied (see the 'KB snapshot EMPTY' line above for why)"
+            )
+    return kb_snapshot, kb_block, KbPromptContext(kb_snapshot, mode="document")
+
+
+def _parse_spec_traced(text: str):
+    with stage(logger, "parse_spec", text_chars=len(text)) as st:
+        parsed = parse_field_spec_document(text)
+        if parsed:
+            st["sections"] = len(parsed.sections)
+            st["fields"] = sum(len(sec.fields) for sec in parsed.sections)
+            st["validators"] = len(parsed.cross_field_validators or [])
+        else:
+            st["result"] = "not a field-spec table -> generic document prompt path"
+        return parsed
+
+
+def _timed_finalize(finalize):
+    """Time + log the post-generation step (KB ids/binding, append onto the canvas)."""
+
+    def _timed(generated, warnings, base_form):
+        with stage(logger, "finalize", append=base_form is not None) as st:
+            result = finalize(generated, warnings, base_form)
+            st["status"] = getattr(result.status, "value", result.status)
+            st["warnings"] = len(result.warnings or [])
+            if result.status is GenerateStatus.FAILED:
+                logger.error(
+                    "document_flow: finalize FAILED: %s", " | ".join(result.errors)[:800]
+                )
+            return result
+
+    return _timed
+
+
+def _with_kb(prompt: str, kb_block: str) -> str:
+    """Append the published-KB block to a prompt (no-op when empty)."""
+    return f"{prompt}\n\n{kb_block}" if kb_block else prompt
+
+
+def _kb_bound_finalize(finalize, kb_snapshot: list[dict[str, Any]], user_text: str | None):
+    """
+    Wrap a finalizer so the generated form gets live KB datasources (e.g. the
+    District list for State) before it is merged or returned.
+    """
+    if not kb_snapshot:
+        return finalize
+
+    def _bound(
+        generated: dict[str, Any] | None,
+        warnings: list[str],
+        base_form: dict[str, Any] | None,
+    ) -> GenerateResult:
+        if generated is None:
+            return finalize(generated, warnings, base_form)
+        # Canonical ids first (safety net for the section fallback / repairs): later
+        # steps and the cascade resolution then see the KB ids. Ids already on the
+        # canvas are reserved so an append never creates a duplicate.
+        generated, id_warnings = apply_kb_field_ids(
+            generated, kb_snapshot, reserved_ids=form_field_ids(base_form)
+        )
+        bound, kb_warnings = bind_kb_to_form(generated, kb_snapshot, user_text or "")
+        for note in id_warnings + kb_warnings:
+            logger.info("document_flow: KB applied: %s", note)
+        return finalize(bound, warnings + id_warnings + kb_warnings, base_form)
+
+    return _bound
 
 
 def _finalize_document_result(

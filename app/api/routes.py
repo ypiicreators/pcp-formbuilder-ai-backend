@@ -18,12 +18,16 @@ NOTE (plan v3 §7.12): the flows are LINEAR pipelines, NOT a LangGraph graph.
 
 # import json  # (was used by the commented-out multipart /generate endpoint)
 
+import asyncio
 import json as _json
+import logging
+import time
 
 from fastapi import APIRouter, File, Form, HTTPException, UploadFile
 from fastapi.responses import StreamingResponse
 
 from app.config import get_settings
+from app.core.doc_trace import begin_trace, log_summary
 from app.core.generate_prompt_gate import assess_generate_prompt_sufficiency
 from app.db import mongo
 from app.models.schemas import (
@@ -58,6 +62,8 @@ from app.orchestration.workflow_generate_flow import (
 )
 from app.providers.base import LLMError
 from app.providers.factory import get_provider
+
+logger = logging.getLogger("app.api.routes")
 
 #: Max upload accepted by the document endpoint (pre-conversion). A generous cap
 #: that still guards against absurd uploads; the flow enforces a tighter
@@ -167,16 +173,41 @@ async def assist_document(
     except LLMError as exc:
         raise HTTPException(status_code=422, detail=str(exc))
 
-    result = await run_document_flow(
-        file_bytes=data,
-        filename=file.filename or "document",
+    begin_trace(
+        logger,
+        "assist-document",
+        file=file.filename,
+        bytes=len(data),
         content_type=file.content_type,
-        instruction=prompt,
-        provider=provider,
-        base_form=base_form,
+        append=base_form is not None,
+        provider=getattr(provider, "name", type(provider).__name__),
     )
-    if result.status is GenerateStatus.FAILED:
-        raise HTTPException(status_code=422, detail={"errors": result.errors})
+    outcome = "error"
+    try:
+        result = await run_document_flow(
+            file_bytes=data,
+            filename=file.filename or "document",
+            content_type=file.content_type,
+            instruction=prompt,
+            provider=provider,
+            base_form=base_form,
+        )
+        if result.status is GenerateStatus.FAILED:
+            outcome = "failed"
+            logger.error(
+                "assist-document FAILED (%d errors): %s",
+                len(result.errors),
+                " | ".join(result.errors)[:1500],
+            )
+            raise HTTPException(status_code=422, detail={"errors": result.errors})
+        outcome = "done"
+    except HTTPException:
+        raise
+    except Exception:
+        logger.exception("assist-document crashed")
+        raise
+    finally:
+        log_summary(logger, outcome)
 
     # Document mode creates a whole form (like generate): no "before" diff.
     return GenerateResponse(form=result.form or {}, warnings=result.warnings, diff=None)
@@ -213,6 +244,16 @@ async def assist_document_stream(
     data = await file.read()
 
     async def event_source():
+        trace_started = time.monotonic()
+        begin_trace(
+            logger,
+            "assist-document-stream",
+            file=file.filename,
+            bytes=len(data),
+            content_type=file.content_type,
+            has_instruction=bool(prompt and prompt.strip()),
+            append=bool(base_json and base_json.strip()),
+        )
         # Guard rails first — emit as an error event (stream has 200 status).
         try:
             parsed_base = _parse_optional_base_json(base_json)
@@ -222,18 +263,23 @@ async def assist_document_stream(
             yield _sse({"type": "error", "errors": errors})
             return
         if not data:
+            logger.error("assist-document-stream rejected: empty upload")
             yield _sse({"type": "error", "errors": ["The uploaded file is empty."]})
             return
         if len(data) > _MAX_UPLOAD_BYTES:
             mb = _MAX_UPLOAD_BYTES // (1024 * 1024)
+            logger.error("assist-document-stream rejected: %d bytes > limit", len(data))
             yield _sse({"type": "error", "errors": [f"File too large (limit {mb} MB)."]})
             return
         try:
             provider = get_provider()
         except LLMError as exc:
+            logger.error("assist-document-stream: provider unavailable: %s", exc)
             yield _sse({"type": "error", "errors": [str(exc)]})
             return
 
+        outcome = "ended-without-terminal-event"
+        deltas = delta_chars = 0
         try:
             async for event, payload in run_document_flow_stream(
                 file_bytes=data,
@@ -243,20 +289,53 @@ async def assist_document_stream(
                 provider=provider,
                 base_form=parsed_base,
             ):
+                at = time.monotonic() - trace_started
                 if event == "delta":
+                    deltas += 1
+                    delta_chars += len(payload)
                     yield _sse({"type": "delta", "text": payload})
                 elif event == "progress":
+                    logger.info("sse progress +%.1fs: %s", at, _json.dumps(payload, default=str)[:300])
                     yield _sse(
                         {"type": "progress", **(payload if isinstance(payload, dict) else {})}
                     )
                 elif event == "partial":
+                    logger.info("sse partial form +%.1fs", at)
                     yield _sse({"type": "partial", "form": payload})
                 elif event == "done":
+                    outcome = "done"
+                    logger.info(
+                        "sse done +%.1fs (deltas=%d chars=%d sections=%d)",
+                        at,
+                        deltas,
+                        delta_chars,
+                        len((payload or {}).get("sections", [])) if isinstance(payload, dict) else -1,
+                    )
                     yield _sse({"type": "done", "form": payload})
                 elif event == "error":
+                    outcome = "failed"
+                    errs = payload if isinstance(payload, list) else [payload]
+                    logger.error(
+                        "sse error +%.1fs (%d errors): %s",
+                        at,
+                        len(errs),
+                        " | ".join(str(e) for e in errs)[:1500],
+                    )
                     yield _sse({"type": "error", "errors": payload})
+        except (asyncio.CancelledError, GeneratorExit):
+            outcome = "client-disconnected"
+            logger.warning(
+                "assist-document-stream cancelled after %.1fs (client closed the connection "
+                "or the server reloaded)",
+                time.monotonic() - trace_started,
+            )
+            raise
         except Exception as exc:  # never leak a raw traceback into the stream
+            outcome = "crashed"
+            logger.exception("assist-document-stream crashed")
             yield _sse({"type": "error", "errors": [f"Streaming failed: {exc}"]})
+        finally:
+            log_summary(logger, outcome)
 
     return StreamingResponse(
         event_source(),

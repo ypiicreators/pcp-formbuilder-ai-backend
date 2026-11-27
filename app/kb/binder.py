@@ -7,7 +7,7 @@ import json
 import re
 from typing import Any
 
-from app.kb.match import OPTION_FIELD_TYPES, field_matches_entry
+from app.kb.match import OPTION_FIELD_TYPES, field_matches_entry, payload_roles
 
 PLACEHOLDER_RE = re.compile(r"^\{([a-z_]+)\}$")
 
@@ -128,6 +128,10 @@ def bind_kb_to_form(
             if not field_matches_entry(field, entry, text_l):
                 continue
             roles = _roles_for_entry(entry, form, str(field.get("id", "")))
+            if payload_roles(entry) - set(roles):
+                # Parent field is missing from the form (or is this field); a list with an
+                # unresolved parent would call the API with a literal "{state}".
+                continue
             ds = copy.deepcopy(entry["payload"])
             ds = _resolve_placeholders(ds, roles)
             field["datasource"] = ds

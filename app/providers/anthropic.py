@@ -19,14 +19,21 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import json
 import logging
 import time
 
 import httpx
 
+from app.core.doc_trace import stage
 from app.providers.base import Attachment, LLMError, LLMProvider
 
 logger = logging.getLogger("app.providers.anthropic")
+
+def _describe(exc: Exception) -> str:
+    """Readable error text; httpx timeouts have an EMPTY str(), so include the type."""
+    return f"{type(exc).__name__}: {exc}".rstrip(": ")
+
 
 #: Content types Claude reads as a native base64 `document` block.
 _DOCUMENT_TYPES = {"application/pdf"}
@@ -91,22 +98,31 @@ class AnthropicProvider(LLMProvider):
         )
         headers = self._build_headers()
 
-        started = time.monotonic()
-        has_attachments = bool(attachments)
-        raw = await self._post_with_retry(payload, headers)
-        elapsed = time.monotonic() - started
-        usage = raw.get("usage", {}) if isinstance(raw, dict) else {}
-        logger.info(
-            "Anthropic generate: model=%s attachments=%s took=%.1fs "
-            "input_tokens=%s output_tokens=%s",
-            self._model,
-            has_attachments,
-            elapsed,
-            usage.get("input_tokens", "?"),
-            usage.get("output_tokens", "?"),
-        )
-        content = self._extract_content(raw)
-        return self.strip_code_fences(content)
+        with stage(
+            logger,
+            "llm.generate",
+            model=self._model,
+            prompt_chars=len(system_prompt) + len(user_prompt),
+            attachments=len(attachments or []),
+            max_tokens=payload["max_tokens"],
+            timeout=f"{self._timeout:.0f}s/read",
+        ) as info:
+            raw = await self._post_with_retry(payload, headers, info)
+            usage = raw.get("usage", {}) if isinstance(raw, dict) else {}
+            stop = raw.get("stop_reason") if isinstance(raw, dict) else None
+            info.update(
+                input_tokens=usage.get("input_tokens", "?"),
+                output_tokens=usage.get("output_tokens", "?"),
+                stop_reason=stop,
+            )
+            if stop == "max_tokens":
+                logger.warning(
+                    "llm.generate output TRUNCATED at max_tokens=%s - JSON is likely cut off "
+                    "(raise the token limit or shrink the request)",
+                    payload["max_tokens"],
+                )
+            content = self._extract_content(raw)
+            return self.strip_code_fences(content)
 
     async def generate_stream(
         self,
@@ -139,33 +155,109 @@ class AnthropicProvider(LLMProvider):
 
         started = time.monotonic()
         yielded_any = False
-        try:
-            async with httpx.AsyncClient(timeout=self._timeout) as client:
-                async with client.stream(
-                    "POST", self._url, json=payload, headers=headers
-                ) as resp:
-                    if resp.status_code != 200:
-                        body = (await resp.aread()).decode("utf-8", errors="replace")
-                        raise LLMError(
-                            f"Anthropic stream error {resp.status_code}: {body[:300]}"
-                        )
-                    async for line in resp.aiter_lines():
-                        text = self._parse_sse_line(line)
-                        if text:
-                            yielded_any = True
-                            yield text
-        except httpx.RequestError as exc:
-            raise LLMError(f"Anthropic stream request failed: {exc}") from exc
+        chars = 0
+        first_token_at: float | None = None
+        last_progress = started
+        meta: dict = {}
+        with stage(
+            logger,
+            "llm.stream",
+            model=self._model,
+            prompt_chars=len(system_prompt) + len(user_prompt),
+            attachments=len(attachments or []),
+            max_tokens=payload["max_tokens"],
+            timeout=f"{self._timeout:.0f}s/read",
+        ) as info:
+            try:
+                async with httpx.AsyncClient(timeout=self._timeout) as client:
+                    async with client.stream(
+                        "POST", self._url, json=payload, headers=headers
+                    ) as resp:
+                        info["http_status"] = resp.status_code
+                        info["connect_and_headers"] = f"{time.monotonic() - started:.2f}s"
+                        if resp.status_code != 200:
+                            body = (await resp.aread()).decode("utf-8", errors="replace")
+                            logger.error(
+                                "llm.stream HTTP %s: %s", resp.status_code, body[:300]
+                            )
+                            raise LLMError(
+                                f"Anthropic stream error {resp.status_code}: {body[:300]}"
+                            )
+                        async for line in resp.aiter_lines():
+                            text = self._parse_sse_line(line)
+                            if text:
+                                now = time.monotonic()
+                                if first_token_at is None:
+                                    first_token_at = now
+                                    logger.info(
+                                        "llm.stream first token after %.1fs",
+                                        now - started,
+                                    )
+                                yielded_any = True
+                                chars += len(text)
+                                if now - last_progress >= 15:
+                                    last_progress = now
+                                    logger.info(
+                                        "llm.stream progress: %d chars after %.0fs",
+                                        chars,
+                                        now - started,
+                                    )
+                                yield text
+                            else:
+                                meta.update(self._parse_sse_meta(line))
+            except httpx.RequestError as exc:
+                logger.error(
+                    "llm.stream request error after %.1fs (chars so far=%d): %s",
+                    time.monotonic() - started,
+                    chars,
+                    _describe(exc),
+                )
+                raise LLMError(f"Anthropic stream request failed: {_describe(exc)}") from exc
+            finally:
+                info.update(
+                    chars=chars,
+                    first_token=(
+                        f"{first_token_at - started:.1f}s" if first_token_at else "never"
+                    ),
+                    input_tokens=meta.get("input_tokens", "?"),
+                    output_tokens=meta.get("output_tokens", "?"),
+                    stop_reason=meta.get("stop_reason"),
+                )
 
-        logger.info(
-            "Anthropic generate_stream: model=%s attachments=%s took=%.1fs any=%s",
-            self._model,
-            bool(attachments),
-            time.monotonic() - started,
-            yielded_any,
-        )
-        if not yielded_any:
-            raise LLMError("Anthropic stream returned no content.")
+            if meta.get("stop_reason") == "max_tokens":
+                logger.warning(
+                    "llm.stream output TRUNCATED at max_tokens=%s - JSON is likely cut off "
+                    "(raise the token limit or shrink the request)",
+                    payload["max_tokens"],
+                )
+            if not yielded_any:
+                raise LLMError("Anthropic stream returned no content.")
+
+    @staticmethod
+    def _parse_sse_meta(line: str) -> dict:
+        """Token usage / stop_reason from the non-text SSE events (diagnostics only)."""
+        if not line or not line.startswith("data:"):
+            return {}
+        try:
+            evt = json.loads(line[len("data:"):].strip())
+        except (TypeError, ValueError):
+            return {}
+        out: dict = {}
+        kind = evt.get("type")
+        if kind == "message_start":
+            usage = (evt.get("message") or {}).get("usage") or {}
+            if "input_tokens" in usage:
+                out["input_tokens"] = usage["input_tokens"]
+        elif kind == "message_delta":
+            usage = evt.get("usage") or {}
+            if "output_tokens" in usage:
+                out["output_tokens"] = usage["output_tokens"]
+            stop = (evt.get("delta") or {}).get("stop_reason")
+            if stop:
+                out["stop_reason"] = stop
+        elif kind == "error":
+            logger.error("llm.stream error event: %s", str(evt.get("error"))[:300])
+        return out
 
     @staticmethod
     def _parse_sse_line(line: str) -> str | None:
@@ -236,11 +328,17 @@ class AnthropicProvider(LLMProvider):
             "content-type": "application/json",
         }
 
-    async def _post_with_retry(self, payload: dict, headers: dict) -> dict:
+    async def _post_with_retry(
+        self, payload: dict, headers: dict, info: dict | None = None
+    ) -> dict:
         """POST with bounded retry + exponential backoff on transient errors."""
         last_exc: Exception | None = None
+        attempts = self._max_retries + 1
         async with httpx.AsyncClient(timeout=self._timeout) as client:
-            for attempt in range(self._max_retries + 1):
+            for attempt in range(attempts):
+                attempt_started = time.monotonic()
+                if info is not None:
+                    info["attempts"] = attempt + 1
                 try:
                     resp = await client.post(self._url, json=payload, headers=headers)
                     if resp.status_code == 200:
@@ -250,12 +348,26 @@ class AnthropicProvider(LLMProvider):
                             f"Anthropic transient error {resp.status_code}: {resp.text[:300]}"
                         )
                     else:
+                        logger.error(
+                            "llm.generate HTTP %s after %.1fs: %s",
+                            resp.status_code,
+                            time.monotonic() - attempt_started,
+                            resp.text[:300],
+                        )
                         raise LLMError(
                             f"Anthropic error {resp.status_code}: {resp.text[:300]}"
                         )
                 except httpx.RequestError as exc:
-                    last_exc = LLMError(f"Anthropic request failed: {exc}")
+                    last_exc = LLMError(f"Anthropic request failed: {_describe(exc)}")
 
+                logger.warning(
+                    "llm.generate attempt %d/%d failed after %.1fs: %s%s",
+                    attempt + 1,
+                    attempts,
+                    time.monotonic() - attempt_started,
+                    last_exc,
+                    "" if attempt + 1 < attempts else " (giving up)",
+                )
                 if attempt < self._max_retries:
                     await asyncio.sleep(2**attempt)  # 1s, 2s, ...
 

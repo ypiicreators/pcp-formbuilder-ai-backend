@@ -10,6 +10,7 @@ venv/
 
 # Environment / secrets
 .env
+.env.example
 
 # OS / editor
 .DS_Store

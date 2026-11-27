@@ -27,6 +27,9 @@ class Settings(BaseSettings):
     app_name: str = "PCP AI Form Builder"
     app_version: str = "0.1.0"
     debug: bool = False
+    # Explicit console log level (DEBUG/INFO/WARNING/ERROR). Empty = INFO when DEBUG=true,
+    # else WARNING. Set LOG_LEVEL=INFO to get document-flow timings without DEBUG.
+    log_level: str = ""
 
     # --- LLM provider selection -------------------------------------------
     # azure_openai | openai | anthropic | bedrock | ollama | ...
@@ -64,8 +67,14 @@ class Settings(BaseSettings):
     # Higher cap for one-shot spec enrich (skeleton + dependencies) only.
     doc_spec_enrich_max_tokens: int = 24000
 
-    # Stream enrich then parse often duplicates a full generate on failure — off by default.
-    doc_spec_enrich_use_stream: bool = False
+    # Streamed enrich keeps bytes flowing, so the provider's per-read timeout cannot
+    # fire on a long output. A failed streamed attempt goes straight to the section
+    # path (no second full call).
+    doc_spec_enrich_use_stream: bool = True
+
+    # How many spec sections are generated at the same time in the section-by-section
+    # fallback (sections are independent; merged back in document order).
+    doc_spec_section_concurrency: int = 4
 
     # --- CORS --------------------------------------------------------------
     # Comma-separated list of allowed origins (mirrors the extractor service).

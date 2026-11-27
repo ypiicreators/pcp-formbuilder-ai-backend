@@ -5,7 +5,24 @@ from __future__ import annotations
 import json
 from typing import Any
 
+from app.kb.identity import resolve_identity
 from app.kb.match import select_kb_entries
+
+
+class KbPromptContext:
+    """Published KB for one request. Builds a prompt block scoped to a given text,
+    so each call only carries the entries that match what it is generating."""
+
+    def __init__(self, entries: list[dict[str, Any]], *, mode: str = "document") -> None:
+        self.entries = entries
+        self.mode = mode
+
+    def block_for(self, text: str) -> str:
+        return build_kb_prompt_block(self.entries, text, mode=self.mode)
+
+    def identity_for(self, label: str, field_type: str | None = None):
+        """Canonical id/type pinned by a KB template for a field with this label, if any."""
+        return resolve_identity(self.entries, label, field_type)
 
 
 def build_kb_prompt_block(

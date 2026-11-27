@@ -29,6 +29,7 @@ from typing import Any
 from app.config import get_settings
 from app.core.change_set import _loads_tolerant  # fence-tolerant JSON parse
 from app.kb.binder import bind_kb_to_form
+from app.kb.identity import apply_kb_field_ids
 from app.kb.loader import fetch_live_kb
 from app.kb.prompt import build_kb_prompt_block
 from app.prompts.system_prompt import get_system_prompt
@@ -126,6 +127,7 @@ def _parse_and_validate(
     *,
     kb_snapshot: list | None = None,
     user_text: str = "",
+    kb_identity: list | None = None,
 ) -> _Outcome:
     obj, err = _loads_tolerant(raw)
     if err:
@@ -135,6 +137,11 @@ def _parse_and_validate(
 
     form = _strip_metadata(obj)
     kb_warnings: list[str] = []
+    if kb_identity:
+        # KB-pinned ids (e.g. applying_for_yourself) must be in place before the
+        # business rules run, otherwise a model-chosen id fails validation.
+        form, id_warnings = apply_kb_field_ids(form, kb_identity)
+        kb_warnings.extend(id_warnings)
     if kb_snapshot:
         form, kb_warnings = bind_kb_to_form(form, kb_snapshot, user_text)
 

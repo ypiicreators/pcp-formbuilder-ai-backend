@@ -31,6 +31,10 @@ RULES:
 - Map dependency notes to the correct field ids in the skeleton.
 - Allowed field types include: {types}
 - Use "en" labels; add "pa" only when the label already implies Punjabi.
+- If the user message contains a PUBLISHED KNOWLEDGE BASE section, it takes precedence over
+  the defaults above: follow its policies and standards, and for any field it covers use
+  its "datasource" (and set "kbKey") instead of static options, even where a rule above
+  says to keep options.
 """
 
 
@@ -38,11 +42,12 @@ def build_spec_enrich_user_prompt(
     skeleton: dict,
     dependency_manifest: list[dict[str, str]],
     instruction: str | None,
+    kb_block: str = "",
 ) -> str:
     admin = (instruction or "").strip() or DEFAULT_DOC_INSTRUCTION
     skel_json = json.dumps(skeleton, ensure_ascii=False, indent=None)
     manifest_json = json.dumps(dependency_manifest, ensure_ascii=False, indent=None)
-    return f"""\
+    prompt = f"""\
 MODE: enrich_form_from_spec_skeleton
 
 Return the COMPLETE form object with all sections/fields from the skeleton, enriched.
@@ -62,6 +67,9 @@ DEPENDENCY MANIFEST (apply to the fieldIds listed):
 {manifest_json}
 \"\"\"
 """
+    if kb_block:
+        prompt = f"{prompt}\n{kb_block}\n"
+    return prompt
 
 
 def build_spec_section_repair_system_prompt() -> str:
