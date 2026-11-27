@@ -30,6 +30,7 @@ from app.prompts.spec_enrich_prompts import (
     build_spec_enrich_user_prompt,
 )
 from app.prompts.user_prompts import build_repair_prompt
+from app.orchestration.progress import creating_section, event as progress_event, validating_section
 from app.providers.base import LLMError, LLMProvider
 
 logger = logging.getLogger("app.orchestration.spec_enrich_flow")
@@ -152,10 +153,14 @@ async def run_spec_enrich_flow_stream(
     kb_block = kb.block_for(section_scope_text(sections)) if kb else ""
 
     started = time.monotonic()
-    yield (
-        "progress",
-        {"phase": "skeleton", "sections": len(sections), "message": "Building form skeleton"},
+    total = len(sections)
+    yield progress_event(
+        "skeleton",
+        f"Creating {total} section{'s' if total != 1 else ''} from the document…",
+        sections=total,
     )
+    for i, sec in enumerate(sections, start=1):
+        yield creating_section(i, total, sec.title)
     with stage(logger, "skeleton", sections=len(sections)) as st:
         skeleton, manifest, skel_warnings = build_spec_skeleton(
             sections,
@@ -168,9 +173,10 @@ async def run_spec_enrich_flow_stream(
         st["kb_prompt_chars"] = len(kb_block)
     yield ("partial", skeleton)
 
-    yield (
-        "progress",
-        {"phase": "enrich", "sections": len(sections), "message": "Applying dependencies"},
+    yield progress_event(
+        "enrich",
+        "Adding field types, options, and validations…",
+        sections=total,
     )
 
     enriched: dict[str, Any] | None = None
@@ -192,6 +198,8 @@ async def run_spec_enrich_flow_stream(
             max_tokens=settings.doc_spec_enrich_max_tokens,
         ) as st:
             try:
+                seen_titles: list[str] = []
+                last_beat = time.monotonic()
                 async for frag in provider.generate_stream(
                     system,
                     user,
@@ -200,6 +208,26 @@ async def run_spec_enrich_flow_stream(
                 ):
                     chunks.append(frag)
                     yield ("delta", frag)
+                    buf = "".join(chunks)
+                    newly = _new_section_titles(buf, sections, seen_titles)
+                    for idx, title in newly:
+                        seen_titles.append(title)
+                        yield creating_section(idx, total, title)
+                        last_beat = time.monotonic()
+                    now = time.monotonic()
+                    if now - last_beat >= 15:
+                        last_beat = now
+                        current = seen_titles[-1] if seen_titles else None
+                        if current:
+                            yield progress_event(
+                                "enrich",
+                                f"Still adding fields in {current}…",
+                            )
+                        else:
+                            yield progress_event(
+                                "enrich",
+                                "Still adding field types and validations…",
+                            )
                 raw_from_stream = "".join(chunks)
                 st["output_chars"] = len(raw_from_stream)
                 parsed = _parse_and_validate(
@@ -221,10 +249,7 @@ async def run_spec_enrich_flow_stream(
                 logger.warning("spec_enrich stream: LLM error: %s", exc)
 
     if enriched is None and raw_from_stream:
-        yield (
-            "progress",
-            {"phase": "repair", "message": "Fixing enrich output"},
-        )
+        yield progress_event("repair", "Fixing the generated form…")
         partial = _parse_and_validate(
             raw_from_stream, kb_identity=kb.entries if kb else None
         )
@@ -275,12 +300,11 @@ async def run_spec_enrich_flow_stream(
             yield ev
         return
 
+    for i, sec in enumerate(sections, start=1):
+        yield validating_section(i, total, sec.title)
     outcome = _validate_enriched(sections, enriched, kb_entries=kb.entries if kb else None)
     if not outcome.ok:
-        yield (
-            "progress",
-            {"phase": "repair", "message": "Fixing validation issues"},
-        )
+        yield progress_event("repair", "Fixing validation issues…")
         repaired = await _repair_full_form(
             sections,
             enriched,
@@ -303,6 +327,7 @@ async def run_spec_enrich_flow_stream(
             f"Built {len(sections)} section(s) via skeleton + enrich in "
             f"{time.monotonic() - started:.1f}s.",
         )
+        yield progress_event("finalize", "Applying platform field rules…")
         finalized = finalize(outcome.form, warnings, base_form)
         if finalized.status is GenerateStatus.FAILED:
             yield ("error", finalized.errors)
@@ -310,9 +335,9 @@ async def run_spec_enrich_flow_stream(
             yield ("done", finalized.form or {})
         return
 
-    yield (
-        "progress",
-        {"phase": "fallback", "message": "Enrich incomplete — building section-by-section"},
+    yield progress_event(
+        "fallback",
+        "Building the form section by section…",
     )
     async for ev in _fallback_section_stream(
         sections,
@@ -325,6 +350,22 @@ async def run_spec_enrich_flow_stream(
         kb=kb,
     ):
         yield ev
+
+
+def _new_section_titles(
+    buf: str, sections: list[SpecSection], already: list[str]
+) -> list[tuple[int, str]]:
+    """Return newly appeared spec section titles in the streamed JSON buffer."""
+    found: list[tuple[int, str]] = []
+    seen = set(already)
+    for i, sec in enumerate(sections, start=1):
+        title = (sec.title or "").strip()
+        if not title or title in seen:
+            continue
+        if title in buf:
+            found.append((i, title))
+            seen.add(title)
+    return found
 
 
 def _validate_enriched(

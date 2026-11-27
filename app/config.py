@@ -83,7 +83,9 @@ class Settings(BaseSettings):
         "http://localhost:3000,"
         "http://localhost:5173,"
         "https://digi.punjab.gov.in,"
-        "https://citizenserv.e-connectsolutions.com"
+        "https://citizenserv.e-connectsolutions.com,"
+        "https://pcppreprod.e-connectsolutions.com,"
+        "https://pcp-dev.e-connectsolutions.com"
     )
 
     @property

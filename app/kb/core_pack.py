@@ -79,9 +79,15 @@ Every citizen service starts with the applicant (the logged-in citizen).
   Punjabi). Both required; the Punjabi field is filled by transliteration from the
   English one (transliteration + transliterationField), not a separate free input.
 - Name rules: English 3-50 letters with single spaces only; Punjabi in Gurmukhi only.
+- Locale pairs (always, even if the document only lists English): whenever the form
+  has applicant_name, father_name (text, English), mother_name (text, English),
+  spouse_name (text, English), or applicant_address (textarea, English), also emit
+  the matching _pa sibling immediately after it. Do not wait for the document to
+  mention Punjabi.
 - Contact: mobile_number (phone) and email_id (email); normally filled from the
   citizen profile (see the profile autofill policy).
-- Do not add extra applicant fields (father, address, etc.) unless the request asks.
+- Do not add extra applicant fields (father, address, etc.) unless the request asks
+  or the uploaded spec lists them.
 - Never rename an existing field id; ids are backend contract keys.
 """,
         ["applicant", "citizen", "mobile number", "email id"],

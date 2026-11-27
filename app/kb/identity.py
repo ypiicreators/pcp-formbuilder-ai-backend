@@ -199,9 +199,12 @@ def _lang_ok(canonical: str, hay: str, payload: dict[str, Any], all_ids: set[str
     label_lang = _label_lang(hay)
     lang = str(payload.get("_lang") or "")
     is_pa = canonical.endswith("_pa") or lang in ("punjabi", "gurmukhi")
-    is_en = lang == "english" or f"{re.sub(r'_pa$', '', canonical)}_pa" in all_ids and not is_pa
+    is_en = lang == "english" or (
+        f"{re.sub(r'_pa$', '', canonical)}_pa" in all_ids and not is_pa
+    )
     if is_pa:
-        return label_lang != "en"
+        # "Applicant Name" with no language marker is English, not Punjabi.
+        return label_lang == "pa"
     if is_en:
         return label_lang != "pa"
     return True
@@ -337,3 +340,107 @@ def _merge_payload(field: dict[str, Any], entry: dict[str, Any]) -> None:
         if k not in ("id", "label") and not str(k).startswith("_"):
             field[k] = copy.deepcopy(v)
     field["kbKey"] = entry["key"]
+
+
+_PERSON_NAME = re.compile(
+    r"\b(applicant|father|mother|spouse|husband|wife|beneficiary|guardian)\b.*\bname\b"
+    r"|^\s*(father|mother|applicant|spouse)\s+(full\s+)?name\b",
+    re.IGNORECASE,
+)
+_ADDRESS_PAIR = re.compile(
+    r"\b(applicant|permanent|correspondence|present|current)?\s*address\b",
+    re.IGNORECASE,
+)
+_PAIR_TYPES = frozenset({"text", "textarea"})
+
+
+def _en_label(field: dict[str, Any]) -> str:
+    label = field.get("label")
+    if isinstance(label, dict):
+        return str(label.get("en") or "")
+    return str(label or "")
+
+
+def _needs_punjabi_pair(field: dict[str, Any]) -> bool:
+    if not isinstance(field, dict) or field.get("type") not in _PAIR_TYPES:
+        return False
+    fid = str(field.get("id") or "")
+    if not fid or fid.endswith("_pa"):
+        return False
+    hay = _hay(_en_label(field), fid)
+    if _label_lang(hay) == "pa":
+        return False
+    return bool(_PERSON_NAME.search(hay) or _ADDRESS_PAIR.search(hay) or fid.endswith("_name"))
+
+
+def _punjabi_label(english: str) -> str:
+    base = re.sub(r"\s*\((english|en)\)\s*$", "", english or "", flags=re.IGNORECASE).strip()
+    if not base:
+        return "Punjabi"
+    if re.search(r"\(punjabi|ਪੰਜਾਬੀ\)", base, re.IGNORECASE):
+        return base
+    return f"{base} (Punjabi)"
+
+
+def ensure_punjabi_pairs(form: dict[str, Any]) -> tuple[dict[str, Any], list[str]]:
+    """
+    If the form has Applicant Name / Father Name / similar English fields, add the
+    matching `_pa` sibling (transliteration target) even when the document omitted it.
+    """
+    if not isinstance(form, dict):
+        return form, []
+    warnings: list[str] = []
+    taken = form_field_ids(form)
+    for section in form.get("sections") or []:
+        fields = section.get("fields") if isinstance(section, dict) else None
+        if not isinstance(fields, list):
+            continue
+        i = 0
+        while i < len(fields):
+            field = fields[i]
+            if not _needs_punjabi_pair(field):
+                i += 1
+                continue
+            en_id = str(field["id"])
+            pa_id = f"{en_id}_pa"
+            field["transliteration"] = True
+            field["transliterationField"] = pa_id
+            already = next(
+                (f for f in fields if isinstance(f, dict) and f.get("id") == pa_id),
+                None,
+            )
+            if already is None and pa_id not in taken:
+                pa_field: dict[str, Any] = {
+                    "id": pa_id,
+                    "type": field.get("type") or "text",
+                    "label": {"en": _punjabi_label(_en_label(field))},
+                }
+                if field.get("required") is True:
+                    pa_field["required"] = True
+                fields.insert(i + 1, pa_field)
+                taken.add(pa_id)
+                warnings.append(
+                    f'KB locale pair: added "{pa_id}" for "{en_id}" (Punjabi not in the document).'
+                )
+                i += 2
+                continue
+            i += 1
+    return form, warnings
+
+
+def coerce_dependency_lists(form: dict[str, Any]) -> dict[str, Any]:
+    """dependsOn / dependsOnAny must be string arrays (the config panel calls .join/.map)."""
+    for field in _walk_fields(form):
+        for key in ("dependsOn", "dependsOnAny"):
+            value = field.get(key)
+            if value is None:
+                continue
+            if isinstance(value, str):
+                parts = [p.strip() for p in value.split(",") if p.strip()]
+                if parts:
+                    field[key] = parts
+                else:
+                    field.pop(key, None)
+            elif not isinstance(value, list):
+                field.pop(key, None)
+    return form

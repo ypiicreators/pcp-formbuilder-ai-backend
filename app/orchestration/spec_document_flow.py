@@ -22,6 +22,12 @@ from app.core.doc_trace import scope, stage
 from app.config import get_settings
 from app.core.doc_spec_parser import SpecSection, spec_summary_for_prompt
 from app.kb.prompt import KbPromptContext
+from app.orchestration.progress import (
+    creating_section,
+    event as progress_event,
+    finished_section,
+    validating_section,
+)
 from app.orchestration.generate_flow import (
     GenerateResult,
     GenerateStatus,
@@ -109,26 +115,22 @@ async def run_spec_document_flow_stream(
     built: list[dict[str, Any] | None] = [None] * total
     done = 0
 
-    gen = _generate_sections_concurrently(
+    gen = _generate_sections_with_starts(
         sections, provider, instruction, max_repair_attempts, kb=kb
     )
     try:
-        async for idx, section_dict, err in gen:
+        async for kind, idx, section_dict, err in gen:
+            title = sections[idx - 1].title
+            if kind == "start":
+                yield creating_section(idx, total, title)
+                continue
             if err:
                 yield ("error", [err])
                 return
+            yield validating_section(idx, total, title)
             built[idx - 1] = section_dict
             done += 1
-            title = sections[idx - 1].title
-            yield (
-                "progress",
-                {
-                    "phase": "sections",
-                    "done": done,
-                    "total": total,
-                    "message": f"Built {done} of {total} sections ({title})",
-                },
-            )
+            yield finished_section(done, total, title)
     finally:
         await gen.aclose()
 
@@ -145,6 +147,7 @@ async def run_spec_document_flow_stream(
     warnings = [
         f"Built {len(built)} section(s) from the document spec (section-by-section).",
     ]
+    yield progress_event("finalize", "Applying platform field rules…")
     finalized = finalize(outcome.form, warnings + outcome.warnings, base_form)
     if finalized.status is GenerateStatus.FAILED:
         yield ("error", finalized.errors)
@@ -175,6 +178,64 @@ async def _build_all_sections(
     if any(s is None for s in built):
         return None, ["Some sections were not built."]
     return [s for s in built if s is not None], None
+
+
+async def _generate_sections_with_starts(
+    sections: list[SpecSection],
+    provider: LLMProvider,
+    instruction: str | None,
+    max_repair_attempts: int,
+    *,
+    kb: KbPromptContext | None = None,
+) -> AsyncIterator[tuple[str, int, dict[str, Any] | None, str | None]]:
+    """Yield ('start'| 'done', index, section_dict, error) as work begins and finishes."""
+    limit = max(1, get_settings().doc_spec_section_concurrency)
+    checklist = spec_summary_for_prompt(sections)
+    total = len(sections)
+    semaphore = asyncio.Semaphore(limit)
+    queue: asyncio.Queue[
+        tuple[str, int, dict[str, Any] | None, str | None]
+    ] = asyncio.Queue()
+
+    async def build(idx: int, sec: SpecSection) -> None:
+        await queue.put(("start", idx, None, None))
+        queued_at = time.monotonic()
+        async with semaphore:
+            waited = time.monotonic() - queued_at
+            if waited >= 0.5:
+                with scope(f"section {idx}/{total}"):
+                    logger.info(
+                        "waited %.1fs for a free slot (concurrency=%d)", waited, limit
+                    )
+            section_dict, err = await _generate_one_section(
+                sec,
+                idx,
+                total,
+                checklist,
+                provider,
+                instruction,
+                max_repair_attempts,
+                kb=kb,
+            )
+            await queue.put(("done", idx, section_dict, err))
+
+    tasks = [
+        asyncio.ensure_future(build(idx, sec))
+        for idx, sec in enumerate(sections, start=1)
+    ]
+    remaining = len(tasks)
+    try:
+        while remaining:
+            kind, idx, section_dict, err = await queue.get()
+            yield kind, idx, section_dict, err
+            if kind == "done":
+                remaining -= 1
+                if err:
+                    break
+    finally:
+        for task in tasks:
+            if not task.done():
+                task.cancel()
 
 
 async def _generate_sections_concurrently(

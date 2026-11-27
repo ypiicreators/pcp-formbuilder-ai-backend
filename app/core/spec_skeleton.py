@@ -35,6 +35,11 @@ def normalize_field_type(raw: str) -> str:
     aliases = {
         "mobile": "phone",
         "mobile_number": "phone",
+        "dropdown": "select",
+        "textbox": "text",
+        "text box": "text",
+        "calender": "date",
+        "calendar": "date",
     }
     return aliases.get(key, _ALLOWED.get(key, "text"))
 

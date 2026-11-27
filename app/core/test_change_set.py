@@ -108,6 +108,143 @@ def test_section_visible_when_shows_in_diff():
     assert "fields" not in (by_id["property_detail"].after or {})
 
 
+def test_move_field_after_anchor():
+    form = {
+        "sections": [
+            {
+                "id": "service_details",
+                "title": {"en": "Service Details"},
+                "fields": [
+                    {"id": "region", "type": "select", "label": {"en": "Region"}},
+                    {"id": "business_address", "type": "text", "label": {"en": "Business Address"}},
+                    {"id": "village", "type": "select", "label": {"en": "Village"}},
+                ],
+            }
+        ]
+    }
+    parsed = parse_change_set([
+        {"op": "moveField", "fieldId": "village", "afterFieldId": "region"},
+    ])
+    assert parsed.ok, parsed.errors
+    applied = apply_change_set(form, parsed.ops)
+    assert applied.ok, applied.errors
+    ids = [f["id"] for f in applied.form["sections"][0]["fields"]]
+    assert ids == ["region", "village", "business_address"]
+    changed = list_changed_ids(form, applied.form)
+    assert "village" in changed
+
+
+def test_move_field_into_new_section():
+    form = {
+        "sections": [
+            {
+                "id": "documents",
+                "title": {"en": "Documents"},
+                "fields": [
+                    {"id": "application_form", "type": "file", "label": {"en": "Application Form"}},
+                    {"id": "declaration", "type": "checkbox", "label": {"en": "Declaration"}},
+                ],
+            }
+        ]
+    }
+    parsed = parse_change_set([
+        {
+            "op": "addSection",
+            "sectionId": "declaration",
+            "value": {"id": "declaration", "title": {"en": "Declaration"}},
+        },
+        {"op": "moveField", "fieldId": "declaration", "sectionId": "declaration"},
+    ])
+    assert parsed.ok, parsed.errors
+    applied = apply_change_set(form, parsed.ops)
+    assert applied.ok, applied.errors
+    docs = [f["id"] for f in applied.form["sections"][0]["fields"]]
+    decl = [f["id"] for f in applied.form["sections"][1]["fields"]]
+    assert docs == ["application_form"]
+    assert decl == ["declaration"]
+    assert applied.form["sections"][1]["id"] == "declaration"
+
+
+def test_add_section_with_copied_field_moves_instead_of_duplicating():
+    form = {
+        "sections": [
+            {
+                "id": "documents",
+                "fields": [
+                    {"id": "declaration", "type": "checkbox", "label": {"en": "Declaration"}},
+                ],
+            }
+        ]
+    }
+    parsed = parse_change_set([
+        {
+            "op": "addSection",
+            "sectionId": "declaration",
+            "value": {
+                "id": "declaration",
+                "title": {"en": "Declaration"},
+                "fields": [
+                    {"id": "declaration", "type": "checkbox", "label": {"en": "Declaration"}},
+                ],
+            },
+        }
+    ])
+    assert parsed.ok, parsed.errors
+    applied = apply_change_set(form, parsed.ops)
+    assert applied.ok, applied.errors
+    ids = [
+        f["id"]
+        for sec in applied.form["sections"]
+        for f in sec.get("fields") or []
+    ]
+    assert ids == ["declaration"]
+    assert applied.form["sections"][0]["fields"] == []
+    assert applied.form["sections"][1]["fields"][0]["id"] == "declaration"
+
+
+def test_add_field_existing_id_moves():
+    form = {
+        "sections": [
+            {
+                "id": "documents",
+                "fields": [
+                    {"id": "declaration", "type": "checkbox", "label": {"en": "I agree"}},
+                ],
+            },
+            {"id": "declaration", "title": {"en": "Declaration"}, "fields": []},
+        ]
+    }
+    parsed = parse_change_set([
+        {
+            "op": "addField",
+            "sectionId": "declaration",
+            "value": {"id": "declaration", "type": "checkbox", "label": {"en": "I agree"}},
+        }
+    ])
+    assert parsed.ok, parsed.errors
+    applied = apply_change_set(form, parsed.ops)
+    assert applied.ok, applied.errors
+    assert [f["id"] for f in applied.form["sections"][0]["fields"]] == []
+    assert applied.form["sections"][1]["fields"][0]["label"]["en"] == "I agree"
+
+
+def test_move_field_requires_anchor():
+    parsed = parse_change_set([
+        {"op": "moveField", "fieldId": "village"},
+    ])
+    assert not parsed.ok
+    assert any("afterFieldId" in e for e in parsed.errors)
+
+
+def test_set_column_prop_missing_property_hints_move_field():
+    parsed = parse_change_set([
+        {"op": "setColumnProp", "tableId": "t", "fieldId": "village"},
+        {"op": "setColumnProp", "tableId": "t", "fieldId": "region"},
+    ])
+    assert not parsed.ok
+    assert any("moveField" in e for e in parsed.errors)
+
+
 def test_cannot_replace_section_fields_array():
     parsed = parse_change_set([
         {

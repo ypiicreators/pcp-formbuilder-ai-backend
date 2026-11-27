@@ -274,10 +274,14 @@ SUPPORTED OPERATIONS (use only these):
   {{ "op": "addField",       "sectionId": "<section_id>",
      "value": {{ "id": "<new_id>", "type": "<FieldType>", "label": {{ "en": "<text>" }} }} }},
   {{ "op": "removeField",    "fieldId": "<id>" }},
+  {{ "op": "moveField",      "fieldId": "<id>", "afterFieldId": "<existing_id>" }},
+  {{ "op": "moveField",      "fieldId": "<id>", "sectionId": "<section_id>" }},
   {{ "op": "addColumn",      "tableId": "<table_id>",
      "value": {{ "id": "<column_id>", "type": "<TableColumnType>", "label": {{ "en": "<text>" }},
                 "required"?: boolean }} }},
-  {{ "op": "removeColumn",   "tableId": "<table_id>", "fieldId": "<column_id>" }}
+  {{ "op": "removeColumn",   "tableId": "<table_id>", "fieldId": "<column_id>" }},
+  {{ "op": "moveColumn",     "tableId": "<table_id>", "fieldId": "<column_id>",
+     "afterFieldId": "<existing_column_id>" }}
 ]
 
 RULES:
@@ -288,6 +292,15 @@ RULES:
 - Never invent operation names. There is no updateColumn / updateField /
   updateSection. To change a property, use setProp (field), setSectionProp
   (section), or setColumnProp (table column).
+- Place / move / reorder an EXISTING field: use moveField. Same section:
+  {{ "op": "moveField", "fieldId": "village", "afterFieldId": "region" }}
+  Into a NEW section (keep the same field id — never addField a copy):
+  {{ "op": "addSection", "sectionId": "declaration",
+     "value": {{ "id": "declaration", "title": {{ "en": "Declaration" }} }} }},
+  {{ "op": "moveField", "fieldId": "declaration", "sectionId": "declaration" }}
+  addSection value.fields MUST be empty when moving existing fields. Do NOT
+  addField with an id that already exists. Do NOT remove+re-add (that drops
+  config). A section id may match a field id (e.g. both "declaration").
 - Never change a field's "id" or its "order" (these are protected). Never
   replace a section's "fields" / "subSections" arrays with setSectionProp.
 - Never edit top-level metadata (serviceCode, title, description, category, version).
@@ -408,7 +421,12 @@ Never fix validation by dropping whole sections or summarizing the form.
 CHANGE-SET REPAIR HINTS (edit mode):
 - Allowed ops only: setProp, unsetProp, setSectionProp, unsetSectionProp,
   setColumnProp, unsetColumnProp, addOption, removeOption, addField,
-  removeField, addColumn, removeColumn. Never invent names like updateColumn.
+  removeField, moveField, addColumn, removeColumn, moveColumn. Never invent
+  names like updateColumn.
+- Reorder / “place X after Y”: moveField with fieldId + afterFieldId. Never
+  use setColumnProp for field order (setColumnProp always needs property).
+- Move an existing field into a new section: addSection (empty fields) then
+  moveField with that sectionId. Never addField a second copy of the same id.
 - Show/hide a section: setSectionProp visibleWhen on sectionId. Values MUST be
   arrays of option values, e.g. {{ "search_method": ["PROPERTY_ID", "SCHEME_NAME"] }}.
 - Enable Default Value / static pre-fill on a field: setProp autoFillWhen with

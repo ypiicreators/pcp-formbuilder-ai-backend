@@ -20,6 +20,7 @@ about the LLM, the form schema, or FastAPI.
 from __future__ import annotations
 
 import io
+import re
 from pathlib import Path
 
 #: MIME types we treat as "Word document -> extract text".
@@ -106,11 +107,45 @@ def extract_docx_text(data: bytes) -> str:
             elif isinstance(child, CT_Tbl):
                 yield Table(child, parent)
 
+    def _cell_lines(cell) -> list[str]:
+        """Keep soft line-breaks inside a cell (one field name per line)."""
+        raw = (cell.text or "").replace("\r\n", "\n").replace("\r", "\n")
+        lines = [" ".join(part.split()) for part in raw.split("\n")]
+        return [line for line in lines if line] or [""]
+
+    def _is_catalog_header(cells: list[str]) -> bool:
+        """Service Name | Section Name | Field Name — not Field Name | Type | ..."""
+        norm = [re.sub(r"[^a-z0-9]", "", (c or "").lower()) for c in cells]
+        has_section = any("section" in c for c in norm)
+        has_field = any("fieldname" in c or c in {"field", "fields"} for c in norm)
+        has_type = any(c in {"type", "fieldtype"} for c in norm)
+        return has_section and has_field and not has_type
+
     def _render_table(table) -> str:
         rows_out: list[str] = []
-        for row in table.rows:
-            cells = [" ".join(c.text.split()) for c in row.cells]
-            # Drop fully empty rows; keep partial rows (blank cells matter as gaps).
+        catalog = False
+        for ri, row in enumerate(table.rows):
+            per_cell = [_cell_lines(c) for c in row.cells]
+            flat = [lines[0] if len(lines) == 1 else " ".join(lines) for lines in per_cell]
+            if ri == 0:
+                catalog = _is_catalog_header(flat)
+            if catalog:
+                # Repeat service/section on every field line so the parser sees
+                # one field per row instead of a collapsed blob.
+                height = max(len(lines) for lines in per_cell)
+                for i in range(height):
+                    cells = []
+                    for lines in per_cell:
+                        if i < len(lines):
+                            cells.append(lines[i])
+                        elif len(lines) == 1:
+                            cells.append(lines[0])
+                        else:
+                            cells.append("")
+                    if any(cells):
+                        rows_out.append(" | ".join(cells))
+                continue
+            cells = [" ".join(lines) if any(lines) else "" for lines in per_cell]
             if any(cells):
                 rows_out.append(" | ".join(cells))
         return "\n".join(rows_out)

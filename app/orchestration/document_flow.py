@@ -59,7 +59,13 @@ from app.core.document_convert import (
 from app.core.form_merge import merge_generated_sections
 from app.core.doc_trace import ensure_trace, stage
 from app.kb.binder import bind_kb_to_form
-from app.kb.identity import apply_kb_field_ids, form_field_ids, identity_entries
+from app.kb.identity import (
+    apply_kb_field_ids,
+    coerce_dependency_lists,
+    ensure_punjabi_pairs,
+    form_field_ids,
+    identity_entries,
+)
 from app.kb.loader import fetch_live_kb
 from app.kb.prompt import KbPromptContext, build_kb_prompt_block
 
@@ -166,26 +172,25 @@ async def run_document_flow(
         append,
     )
 
-    if prepared.extracted_text is not None:
-        parsed_spec = _parse_spec_traced(prepared.extracted_text)
-        if parsed_spec:
-            logger.info(
-                "document_flow: spec enrich path sections=%d",
-                len(parsed_spec.sections),
-            )
-            from app.orchestration import spec_enrich_flow
+    parsed_spec = await _resolve_spec(prepared, instruction, provider)
+    if parsed_spec:
+        logger.info(
+            "document_flow: spec enrich path sections=%d",
+            len(parsed_spec.sections),
+        )
+        from app.orchestration import spec_enrich_flow
 
-            return await spec_enrich_flow.run_spec_enrich_flow(
-                parsed_spec.sections,
-                provider,
-                instruction,
-                finalize=finalize,
-                base_form=base_form,
-                max_repair_attempts=max_repair_attempts,
-                service_name=parsed_spec.service_name,
-                cross_field_validators=parsed_spec.cross_field_validators,
-                kb=kb_ctx,
-            )
+        return await spec_enrich_flow.run_spec_enrich_flow(
+            parsed_spec.sections,
+            provider,
+            instruction,
+            finalize=finalize,
+            base_form=base_form,
+            max_repair_attempts=max_repair_attempts,
+            service_name=parsed_spec.service_name,
+            cross_field_validators=parsed_spec.cross_field_validators,
+            kb=kb_ctx,
+        )
 
     system_prompt = get_system_prompt()
 
@@ -306,6 +311,10 @@ async def run_document_flow_stream(
     flow_started = time.monotonic()
     append = base_form is not None
 
+    from app.orchestration.progress import event as progress_event
+
+    yield progress_event("read", "Reading your document…")
+
     # --- Prepare input ----------------------------------------------------
     ensure_trace(logger, "document_flow(stream)", file=filename, bytes=len(file_bytes))
     prepared = _prepare_traced(file_bytes, filename, content_type)
@@ -314,33 +323,47 @@ async def run_document_flow_stream(
         yield ("error", [prepared.error])
         return
 
+    yield progress_event("read", "Extracting fields and sections…")
     kb_snapshot, kb_block, kb_ctx = await _load_kb_traced(instruction, prepared)
     finalize = _timed_finalize(
         _kb_bound_finalize(_finalize_document_result, kb_snapshot, instruction)
     )
 
-    if prepared.extracted_text is not None:
-        parsed_spec = _parse_spec_traced(prepared.extracted_text)
-        if parsed_spec:
-            logger.info(
-                "document_flow(stream): spec enrich path sections=%d",
-                len(parsed_spec.sections),
-            )
-            from app.orchestration import spec_enrich_flow
+    parsed_spec = _parse_spec_traced(prepared.extracted_text) if prepared.extracted_text else None
+    if parsed_spec is None:
+        yield progress_event("spec", "Understanding the document structure…")
+        parsed_spec = await _extract_spec_traced(prepared, instruction, provider)
+    if parsed_spec:
+        logger.info(
+            "document_flow(stream): spec enrich path sections=%d",
+            len(parsed_spec.sections),
+        )
+        from app.orchestration import spec_enrich_flow
 
-            async for event in spec_enrich_flow.run_spec_enrich_flow_stream(
-                parsed_spec.sections,
-                provider,
-                instruction,
-                finalize=finalize,
-                base_form=base_form,
-                max_repair_attempts=max_repair_attempts,
-                service_name=parsed_spec.service_name,
-                cross_field_validators=parsed_spec.cross_field_validators,
-                kb=kb_ctx,
-            ):
-                yield event
-            return
+        titles = [s.title for s in parsed_spec.sections if s.title]
+        preview = ", ".join(titles[:5])
+        extra = f" and {len(titles) - 5} more" if len(titles) > 5 else ""
+        yield progress_event(
+            "spec",
+            f"Found {len(parsed_spec.sections)} section"
+            f"{'s' if len(parsed_spec.sections) != 1 else ''}"
+            + (f": {preview}{extra}" if preview else ""),
+            sections=len(parsed_spec.sections),
+        )
+
+        async for event in spec_enrich_flow.run_spec_enrich_flow_stream(
+            parsed_spec.sections,
+            provider,
+            instruction,
+            finalize=finalize,
+            base_form=base_form,
+            max_repair_attempts=max_repair_attempts,
+            service_name=parsed_spec.service_name,
+            cross_field_validators=parsed_spec.cross_field_validators,
+            kb=kb_ctx,
+        ):
+            yield event
+        return
 
     # If streaming isn't supported, fall back to the non-streaming flow and
     # emit its result as a single terminal event (no deltas).
@@ -383,25 +406,37 @@ async def run_document_flow_stream(
         )
         attachments = [prepared.attachment]
 
+    yield progress_event("build", "Building the form from your document…")
+
     # --- First call: STREAM, accumulating the full text -------------------
     chunks: list[str] = []
+    last_beat = time.monotonic()
     try:
         async for fragment in provider.generate_stream(
             system_prompt, user_prompt, attachments=attachments
         ):
             chunks.append(fragment)
             yield ("delta", fragment)
+            now = time.monotonic()
+            if now - last_beat >= 15:
+                last_beat = now
+                yield progress_event(
+                    "build",
+                    "Still building the form from your document…",
+                )
     except LLMError as exc:
         yield ("error", [f"LLM call failed: {exc}"])
         return
 
     raw = "".join(chunks)
+    yield progress_event("validate", "Checking fields and validation…")
     outcome = _parse_and_validate(raw)
     if outcome.ok:
         logger.info(
             "document_flow(stream): SUCCESS on first call, total=%.1fs",
             time.monotonic() - flow_started,
         )
+        yield progress_event("finalize", "Applying platform field rules…")
         finalized = finalize(
             outcome.form, prepared.warnings + outcome.warnings, base_form
         )
@@ -424,6 +459,10 @@ async def run_document_flow_stream(
     last_raw = raw
     while attempts < max_repair_attempts:
         attempts += 1
+        yield progress_event(
+            "repair",
+            f"Fixing validation issues (attempt {attempts} of {max_repair_attempts})…",
+        )
         repair_prompt = _with_kb(
             build_repair_prompt(last_raw, last_errors, is_edit_mode=False), kb_block
         )
@@ -439,6 +478,7 @@ async def run_document_flow_stream(
                 attempts,
                 time.monotonic() - flow_started,
             )
+            yield progress_event("finalize", "Applying platform field rules…")
             finalized = finalize(
                 outcome.form, prepared.warnings + outcome.warnings, base_form
             )
@@ -505,16 +545,42 @@ async def _load_kb_traced(instruction: str | None, prepared: _Prepared):
     return kb_snapshot, kb_block, KbPromptContext(kb_snapshot, mode="document")
 
 
-def _parse_spec_traced(text: str):
+def _parse_spec_traced(text: str | None):
+    if not (text or "").strip():
+        return None
     with stage(logger, "parse_spec", text_chars=len(text)) as st:
         parsed = parse_field_spec_document(text)
         if parsed:
             st["sections"] = len(parsed.sections)
             st["fields"] = sum(len(sec.fields) for sec in parsed.sections)
             st["validators"] = len(parsed.cross_field_validators or [])
+            st["titles"] = [sec.title for sec in parsed.sections]
         else:
-            st["result"] = "not a field-spec table -> generic document prompt path"
+            st["result"] = "no deterministic layout"
         return parsed
+
+
+async def _extract_spec_traced(prepared: _Prepared, instruction: str | None, provider: LLMProvider):
+    """Layout-agnostic fallback: model lists sections/fields, then enrich runs as usual."""
+    from app.orchestration.spec_extract_flow import extract_spec_from_document
+
+    attachments = [prepared.attachment] if prepared.attachment else None
+    parsed = await extract_spec_from_document(
+        provider,
+        extracted_text=prepared.extracted_text,
+        instruction=instruction,
+        attachments=attachments,
+    )
+    if parsed is None:
+        logger.warning("document_flow: spec extract produced nothing; falling back to one-shot form JSON")
+    return parsed
+
+
+async def _resolve_spec(prepared: _Prepared, instruction: str | None, provider: LLMProvider):
+    parsed = _parse_spec_traced(prepared.extracted_text)
+    if parsed is not None:
+        return parsed
+    return await _extract_spec_traced(prepared, instruction, provider)
 
 
 def _timed_finalize(finalize):
@@ -544,8 +610,6 @@ def _kb_bound_finalize(finalize, kb_snapshot: list[dict[str, Any]], user_text: s
     Wrap a finalizer so the generated form gets live KB datasources (e.g. the
     District list for State) before it is merged or returned.
     """
-    if not kb_snapshot:
-        return finalize
 
     def _bound(
         generated: dict[str, Any] | None,
@@ -554,16 +618,27 @@ def _kb_bound_finalize(finalize, kb_snapshot: list[dict[str, Any]], user_text: s
     ) -> GenerateResult:
         if generated is None:
             return finalize(generated, warnings, base_form)
-        # Canonical ids first (safety net for the section fallback / repairs): later
-        # steps and the cascade resolution then see the KB ids. Ids already on the
-        # canvas are reserved so an append never creates a duplicate.
-        generated, id_warnings = apply_kb_field_ids(
-            generated, kb_snapshot, reserved_ids=form_field_ids(base_form)
+        extra: list[str] = []
+        if kb_snapshot:
+            # Canonical ids first (safety net for the section fallback / repairs): later
+            # steps and the cascade resolution then see the KB ids. Ids already on the
+            # canvas are reserved so an append never creates a duplicate.
+            generated, id_warnings = apply_kb_field_ids(
+                generated, kb_snapshot, reserved_ids=form_field_ids(base_form)
+            )
+            extra.extend(id_warnings)
+        generated, pair_warnings = ensure_punjabi_pairs(generated)
+        extra.extend(pair_warnings)
+        generated = coerce_dependency_lists(generated)
+        bound, kb_warnings = (
+            bind_kb_to_form(generated, kb_snapshot, user_text or "")
+            if kb_snapshot
+            else (generated, [])
         )
-        bound, kb_warnings = bind_kb_to_form(generated, kb_snapshot, user_text or "")
-        for note in id_warnings + kb_warnings:
+        extra.extend(kb_warnings)
+        for note in extra:
             logger.info("document_flow: KB applied: %s", note)
-        return finalize(bound, warnings + id_warnings + kb_warnings, base_form)
+        return finalize(bound, warnings + extra, base_form)
 
     return _bound
 

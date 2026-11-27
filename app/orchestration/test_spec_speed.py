@@ -87,9 +87,17 @@ def test_stream_reports_real_progress_per_section(monkeypatch):
         ]
 
     events = asyncio.run(collect())
-    progress = [p for kind, p in events if kind == "progress"]
-    assert [p["done"] for p in progress] == [1, 2, 3]
-    assert all(p["total"] == 3 for p in progress)
+    finished = [
+        p for kind, p in events
+        if kind == "progress" and p.get("phase") == "sections"
+    ]
+    assert [p["done"] for p in finished] == [1, 2, 3]
+    assert all(p["total"] == 3 for p in finished)
+    creating = [
+        p for kind, p in events
+        if kind == "progress" and p.get("phase") == "section"
+    ]
+    assert len(creating) == 3
     assert not any(kind == "delta" for kind, _ in events)
     assert events[-1][0] == "done"
 

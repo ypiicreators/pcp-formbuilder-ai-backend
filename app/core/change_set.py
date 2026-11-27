@@ -51,8 +51,10 @@ class OpType(str, Enum):
     ADD_SECTION = "addSection"     # append a new section to the form
     ADD_FIELD = "addField"         # add a new field to a section
     REMOVE_FIELD = "removeField"   # remove an existing field
+    MOVE_FIELD = "moveField"       # reorder an existing field (after/before another)
     ADD_COLUMN = "addColumn"       # append a column to a table / computed_table / verification
     REMOVE_COLUMN = "removeColumn" # remove a column from a table-like field
+    MOVE_COLUMN = "moveColumn"     # reorder a table column (after/before another)
 
 
 #: Top-level keys the change-set must never touch (backend-owned metadata).
@@ -80,6 +82,10 @@ _UNKNOWN_OP_HINTS = {
     "setSection": "use setSectionProp (sectionId + property + value)",
     "patchColumn": "use setColumnProp",
     "patchField": "use setProp",
+    "move": "use moveField (fieldId + afterFieldId or beforeFieldId)",
+    "reorder": "use moveField (fieldId + afterFieldId or beforeFieldId)",
+    "reorderField": "use moveField (fieldId + afterFieldId or beforeFieldId)",
+    "setOrder": "use moveField; never set property 'order'",
 }
 
 
@@ -94,6 +100,8 @@ class Op:
     value: Any = None           # for setProp / addOption / addField payloads
     option_value: str = ""      # for removeOption
     section_id: str = ""        # for addField / setSectionProp / unsetSectionProp
+    after_field_id: str = ""    # for moveField / moveColumn / addField placement
+    before_field_id: str = ""   # for moveField / moveColumn / addField placement
     raw: dict[str, Any] = field(default_factory=dict)
 
 
@@ -247,7 +255,11 @@ def _parse_one(op_type: OpType, raw: dict, i: int) -> tuple[Op | None, str]:
         if not tid or not fid:
             return None, f"op[{i}] {op_type.value} requires 'tableId' and 'fieldId' (column id)"
         if not prop:
-            return None, f"op[{i}] {op_type.value} requires 'property'"
+            return None, (
+                f"op[{i}] {op_type.value} requires 'property'. "
+                "To move/reorder a field use moveField with fieldId and "
+                "afterFieldId (or beforeFieldId); do not use setColumnProp."
+            )
         if op_type is OpType.SET_COLUMN_PROP and "value" not in raw:
             return None, f"op[{i}] setColumnProp requires 'value'"
         return Op(type=op_type, table_id=tid, field_id=fid, property=prop,
@@ -287,13 +299,40 @@ def _parse_one(op_type: OpType, raw: dict, i: int) -> tuple[Op | None, str]:
             return None, f"op[{i}] addField requires 'sectionId'"
         if not isinstance(newf, dict) or not newf.get("id") or not newf.get("type"):
             return None, f"op[{i}] addField 'value' must be a field object with id+type"
+        after, before, place_err = _parse_placement(raw, i, "addField")
+        if place_err:
+            return None, place_err
         return Op(type=op_type, section_id=sec, field_id=str(newf["id"]),
-                  value=newf, raw=raw), ""
+                  value=newf, after_field_id=after, before_field_id=before,
+                  raw=raw), ""
 
     if op_type is OpType.REMOVE_FIELD:
         if not fid:
             return None, f"op[{i}] removeField requires 'fieldId'"
         return Op(type=op_type, field_id=fid, raw=raw), ""
+
+    if op_type is OpType.MOVE_FIELD:
+        if not fid:
+            return None, f"op[{i}] moveField requires 'fieldId'"
+        after, before, place_err = _parse_placement(raw, i, "moveField", required=False)
+        if place_err:
+            return None, place_err
+        sec = str(raw.get("sectionId") or "")
+        if not after and not before and not sec:
+            return None, (
+                f"op[{i}] moveField requires 'afterFieldId', 'beforeFieldId', or "
+                "'sectionId' (use sectionId to move into a new/empty section)"
+            )
+        if fid in {after, before}:
+            return None, f"op[{i}] moveField cannot place a field relative to itself"
+        return Op(
+            type=op_type,
+            field_id=fid,
+            section_id=sec,
+            after_field_id=after,
+            before_field_id=before,
+            raw=raw,
+        ), ""
 
     if op_type is OpType.ADD_COLUMN:
         tid = raw.get("tableId", "")
@@ -311,7 +350,43 @@ def _parse_one(op_type: OpType, raw: dict, i: int) -> tuple[Op | None, str]:
             return None, f"op[{i}] removeColumn requires 'tableId' and 'fieldId' (column id)"
         return Op(type=op_type, table_id=tid, field_id=fid, raw=raw), ""
 
+    if op_type is OpType.MOVE_COLUMN:
+        tid = raw.get("tableId", "")
+        if not tid or not fid:
+            return None, f"op[{i}] moveColumn requires 'tableId' and 'fieldId' (column id)"
+        after, before, place_err = _parse_placement(raw, i, "moveColumn", required=True)
+        if place_err:
+            return None, place_err
+        if fid in {after, before}:
+            return None, f"op[{i}] moveColumn cannot place a column relative to itself"
+        return Op(
+            type=op_type,
+            table_id=tid,
+            field_id=fid,
+            after_field_id=after,
+            before_field_id=before,
+            raw=raw,
+        ), ""
+
     return None, f"op[{i}] unsupported op '{op_type.value}'"
+
+
+def _parse_placement(
+    raw: dict, i: int, op_name: str, *, required: bool = False
+) -> tuple[str, str, str]:
+    """Return (afterFieldId, beforeFieldId, error)."""
+    after = str(raw.get("afterFieldId") or "").strip()
+    before = str(raw.get("beforeFieldId") or "").strip()
+    if after and before:
+        return "", "", (
+            f"op[{i}] {op_name} takes only one of 'afterFieldId' or 'beforeFieldId'"
+        )
+    if required and not after and not before:
+        return "", "", (
+            f"op[{i}] {op_name} requires 'afterFieldId' or 'beforeFieldId' "
+            "(do not use setColumnProp / setProp to reorder)"
+        )
+    return after, before, ""
 
 
 # --- Applying ---------------------------------------------------------------
@@ -373,8 +448,10 @@ def apply_change_set(form: dict[str, Any], ops: list[Op]) -> ApplyResult:
                 OpType.ADD_SECTION,
                 OpType.ADD_FIELD,
                 OpType.REMOVE_FIELD,
+                OpType.MOVE_FIELD,
                 OpType.ADD_COLUMN,
                 OpType.REMOVE_COLUMN,
+                OpType.MOVE_COLUMN,
             ):
                 index = build_index(working)
         except Exception as exc:  # defensive: never leak a half-applied form
@@ -402,9 +479,22 @@ def _validate_op_targets(
     section_add_counts = section_add_counts or {}
 
     if op.type in (OpType.SET_PROP, OpType.UNSET_PROP, OpType.REMOVE_FIELD,
-                   OpType.ADD_OPTION, OpType.REMOVE_OPTION):
-        if not index.has_id(op.field_id):
+                   OpType.MOVE_FIELD, OpType.ADD_OPTION, OpType.REMOVE_OPTION):
+        if not index.has_id(op.field_id) and op.field_id not in pending_new_ids:
             return f"{op.type.value} targets unknown field '{op.field_id}'"
+
+    if op.type is OpType.MOVE_FIELD:
+        anchor = op.after_field_id or op.before_field_id
+        if (
+            anchor
+            and not index.has_id(anchor)
+            and anchor not in pending_new_ids
+        ):
+            return f"moveField anchor '{anchor}' is not a field on the form"
+        if op.section_id and not _find_section(form, op.section_id) and (
+            op.section_id not in pending_new_sections
+        ):
+            return f"moveField targets unknown section '{op.section_id}'"
 
     if op.type in (OpType.ADD_OPTION, OpType.REMOVE_OPTION):
         entry = index.get_field(op.field_id)
@@ -419,12 +509,23 @@ def _validate_op_targets(
         return ""
 
     if op.type in (OpType.SET_COLUMN_PROP, OpType.UNSET_COLUMN_PROP,
-                   OpType.REMOVE_COLUMN):
+                   OpType.REMOVE_COLUMN, OpType.MOVE_COLUMN):
         if (op.table_id, op.field_id) in pending_new_columns:
             pass  # column is created by addColumn in this same change-set
         elif not index.get_column(op.table_id, op.field_id):
             return (f"{op.type.value} targets unknown column "
                     f"'{op.table_id}.{op.field_id}'")
+        if op.type is OpType.MOVE_COLUMN:
+            anchor = op.after_field_id or op.before_field_id
+            if (
+                anchor
+                and (op.table_id, anchor) not in pending_new_columns
+                and not index.get_column(op.table_id, anchor)
+            ):
+                return (
+                    f"moveColumn anchor '{op.table_id}.{anchor}' is not a column "
+                    "on that table"
+                )
 
     if op.type in (OpType.SET_SECTION_PROP, OpType.UNSET_SECTION_PROP):
         if not _find_section(form, op.section_id) and op.section_id not in pending_new_sections:
@@ -439,9 +540,11 @@ def _validate_op_targets(
                 f"addField targets unknown section '{op.section_id}'. "
                 "Use an existing sectionId from the compact view or addSection first."
             )
-        existing = index.all_field_ids() | (pending_new_ids - {op.field_id})
-        if op.field_id in existing:
-            return f"addField id '{op.field_id}' already exists"
+        # Existing ids are moved into the target section (not duplicated).
+        if op.field_id not in index.all_field_ids():
+            pending_other = pending_new_ids - {op.field_id}
+            if op.field_id in pending_other:
+                return f"addField id '{op.field_id}' duplicated in change-set"
 
     if op.type is OpType.ADD_COLUMN:
         table = index.get_field(op.table_id)
@@ -483,13 +586,28 @@ def _apply_one(op: Op, form: dict) -> str:
         title = val.get("title")
         if not isinstance(title, dict):
             title = {"en": str(title or sec_id.replace("_", " ").title())}
+        incoming = val.get("fields") if isinstance(val.get("fields"), list) else []
         form.setdefault("sections", []).append(
             {
                 "id": sec_id,
                 "title": title,
-                "fields": val.get("fields") if isinstance(val.get("fields"), list) else [],
+                "fields": [],
             }
         )
+        dest = form["sections"][-1]["fields"]
+        index = build_index(form)
+        for item in incoming:
+            if isinstance(item, str) and item:
+                if index.has_id(item):
+                    _move_field(form, item, dest_section_id=sec_id)
+                continue
+            if not isinstance(item, dict) or not item.get("id"):
+                continue
+            fid = str(item["id"])
+            if index.has_id(fid):
+                _move_field(form, fid, dest_section_id=sec_id)
+            else:
+                dest.append(item)
         return sec_id
 
 
@@ -514,11 +632,37 @@ def _apply_one(op: Op, form: dict) -> str:
 
     if op.type is OpType.ADD_FIELD:
         section = _find_section(form, op.section_id)
-        section.setdefault("fields", []).append(op.value)
+        existing_list, _, existing = _locate_field(form, op.field_id)
+        if existing is not None:
+            _move_field(
+                form,
+                op.field_id,
+                after_id=op.after_field_id,
+                before_id=op.before_field_id,
+                dest_section_id=op.section_id,
+            )
+            return op.field_id
+        fields = section.setdefault("fields", [])
+        _place_in_list(
+            fields,
+            op.value,
+            after_id=op.after_field_id,
+            before_id=op.before_field_id,
+        )
         return op.field_id
 
     if op.type is OpType.REMOVE_FIELD:
         _remove_field_everywhere(form, op.field_id)
+        return op.field_id
+
+    if op.type is OpType.MOVE_FIELD:
+        _move_field(
+            form,
+            op.field_id,
+            after_id=op.after_field_id,
+            before_id=op.before_field_id,
+            dest_section_id=op.section_id,
+        )
         return op.field_id
 
     if op.type is OpType.ADD_COLUMN:
@@ -533,6 +677,24 @@ def _apply_one(op: Op, form: dict) -> str:
             c for c in cols
             if not (isinstance(c, dict) and c.get("id") == op.field_id)
         ]
+        return op.table_id
+
+    if op.type is OpType.MOVE_COLUMN:
+        table = index.get_field(op.table_id)
+        cols = table.node.setdefault("columns", [])
+        item = next(
+            (c for c in cols if isinstance(c, dict) and c.get("id") == op.field_id),
+            None,
+        )
+        if item is None:
+            raise ValueError(f"column '{op.field_id}' not found on '{op.table_id}'")
+        _place_in_list(
+            cols,
+            item,
+            after_id=op.after_field_id,
+            before_id=op.before_field_id,
+            already_in_list=True,
+        )
         return op.table_id
 
     return ""
@@ -556,7 +718,9 @@ def _section_snapshot(section: dict[str, Any] | None) -> dict[str, Any] | None:
     }
 
 
-def _resolve_section_id(form: dict, requested: str) -> str | None:
+def _resolve_section_id(
+    form: dict, requested: str, *, allow_only_section: bool = True
+) -> str | None:
     """Map invented section ids (e.g. 'address') to an existing section when obvious."""
     if not requested:
         return None
@@ -577,7 +741,7 @@ def _resolve_section_id(form: dict, requested: str) -> str | None:
         sid = str(sec.get("id", "")).lower()
         if req_id in sid or sid in req_id:
             return sec.get("id")
-    if len(sections) == 1:
+    if allow_only_section and len(sections) == 1:
         only = sections[0].get("id")
         if isinstance(only, str) and only:
             return only
@@ -585,9 +749,25 @@ def _resolve_section_id(form: dict, requested: str) -> str | None:
 
 
 def _normalize_section_ids(form: dict, ops: list[Op]) -> None:
+    pending_sections = {
+        op.section_id for op in ops if op.type is OpType.ADD_SECTION and op.section_id
+    }
     for op in ops:
-        if op.type in (OpType.ADD_FIELD, OpType.SET_SECTION_PROP, OpType.UNSET_SECTION_PROP):
-            resolved = _resolve_section_id(form, op.section_id)
+        if not op.section_id:
+            continue
+        if op.section_id in pending_sections:
+            continue
+        if op.type in (
+            OpType.ADD_FIELD,
+            OpType.MOVE_FIELD,
+            OpType.SET_SECTION_PROP,
+            OpType.UNSET_SECTION_PROP,
+        ):
+            resolved = _resolve_section_id(
+                form,
+                op.section_id,
+                allow_only_section=op.type is not OpType.MOVE_FIELD,
+            )
             if resolved:
                 op.section_id = resolved
 
@@ -599,6 +779,90 @@ def _unknown_op_error(i: int, op_name: Any) -> str:
     hint = _UNKNOWN_OP_HINTS.get(name)
     extra = f"; {hint}" if hint else f". Allowed ops: {_ALLOWED_OPS}"
     return f"op[{i}] has unknown op '{op_name}'{extra}"
+
+
+def _iter_field_lists(form: dict) -> list[list]:
+    lists: list[list] = []
+    for section in form.get("sections", []) or []:
+        if not isinstance(section, dict):
+            continue
+        if isinstance(section.get("fields"), list):
+            lists.append(section["fields"])
+        for sub in section.get("subSections") or []:
+            if isinstance(sub, dict) and isinstance(sub.get("fields"), list):
+                lists.append(sub["fields"])
+    return lists
+
+
+def _locate_field(form: dict, field_id: str) -> tuple[list | None, int, dict | None]:
+    for lst in _iter_field_lists(form):
+        for i, item in enumerate(lst):
+            if isinstance(item, dict) and item.get("id") == field_id:
+                return lst, i, item
+    return None, -1, None
+
+
+def _place_in_list(
+    dest: list,
+    item: dict,
+    *,
+    after_id: str = "",
+    before_id: str = "",
+    already_in_list: bool = False,
+) -> None:
+    """Insert `item` after/before an id, or append. Handles same-list moves."""
+    if already_in_list or any(
+        isinstance(f, dict) and f.get("id") == item.get("id") for f in dest
+    ):
+        dest[:] = [
+            f for f in dest
+            if not (isinstance(f, dict) and f.get("id") == item.get("id"))
+        ]
+    if after_id:
+        for i, f in enumerate(dest):
+            if isinstance(f, dict) and f.get("id") == after_id:
+                dest.insert(i + 1, item)
+                return
+        dest.append(item)
+        return
+    if before_id:
+        for i, f in enumerate(dest):
+            if isinstance(f, dict) and f.get("id") == before_id:
+                dest.insert(i, item)
+                return
+        dest.append(item)
+        return
+    dest.append(item)
+
+
+def _move_field(
+    form: dict,
+    field_id: str,
+    *,
+    after_id: str = "",
+    before_id: str = "",
+    dest_section_id: str = "",
+) -> None:
+    src, _, item = _locate_field(form, field_id)
+    if item is None or src is None:
+        raise ValueError(f"field '{field_id}' not found")
+    src.remove(item)
+
+    dest: list | None = None
+    if dest_section_id:
+        section = _find_section(form, dest_section_id)
+        if section is None:
+            src.append(item)
+            raise ValueError(f"section '{dest_section_id}' not found")
+        dest = section.setdefault("fields", [])
+    else:
+        anchor = after_id or before_id
+        if anchor:
+            dest, _, _ = _locate_field(form, anchor)
+        if dest is None:
+            dest = src
+
+    _place_in_list(dest, item, after_id=after_id, before_id=before_id)
 
 
 def _remove_field_everywhere(form: dict, field_id: str) -> None:
@@ -701,7 +965,36 @@ def list_changed_ids(
             after_sections.get(sid)
         ):
             ids.append(sid)
+
+    before_order = _section_field_orders(original)
+    after_order = _section_field_orders(updated)
+    for sid in list(dict.fromkeys([*before_order, *after_order])):
+        bpos = {fid: i for i, fid in enumerate(before_order.get(sid, []))}
+        apos = {fid: i for i, fid in enumerate(after_order.get(sid, []))}
+        for fid in dict.fromkeys([*bpos, *apos]):
+            if bpos.get(fid) != apos.get(fid) and fid not in ids:
+                ids.append(fid)
     return ids
+
+
+def _section_field_orders(form: dict[str, Any]) -> dict[str, list[str]]:
+    orders: dict[str, list[str]] = {}
+    for section in form.get("sections") or []:
+        if not isinstance(section, dict) or not section.get("id"):
+            continue
+        sid = str(section["id"])
+        ids: list[str] = []
+        for f in section.get("fields") or []:
+            if isinstance(f, dict) and f.get("id"):
+                ids.append(str(f["id"]))
+        for sub in section.get("subSections") or []:
+            if not isinstance(sub, dict):
+                continue
+            for f in sub.get("fields") or []:
+                if isinstance(f, dict) and f.get("id"):
+                    ids.append(str(f["id"]))
+        orders[sid] = ids
+    return orders
 
 
 def diff_to_dicts(diffs: list[FieldDiff]) -> list[dict[str, Any]]:

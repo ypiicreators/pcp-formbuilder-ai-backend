@@ -4,6 +4,8 @@ from app.core.doc_spec_parser import SpecField, SpecSection
 from app.core.spec_skeleton import build_spec_skeleton
 from app.kb.identity import (
     apply_kb_field_ids,
+    coerce_dependency_lists,
+    ensure_punjabi_pairs,
     form_field_ids,
     rename_field_id,
     resolve_identity,
@@ -142,6 +144,53 @@ def test_applicant_identity_policy_pins_full_name_english_to_applicant_name():
     assert ids == ["applicant_name", "applicant_name_pa"]
     assert form["sections"][0]["fields"][1]["transliterationField"] == "applicant_name"
     assert any("applicant_name" in w for w in warnings)
+
+
+def test_unlabeled_applicant_name_is_english_not_punjabi():
+    assert resolve_identity([APPLICANT_IDENTITY], "Applicant Name", "text")["id"] == "applicant_name"
+    form = {
+        "sections": [
+            {
+                "id": "s",
+                "fields": [
+                    {"id": "applicant_name", "type": "text", "label": {"en": "Applicant Name"}},
+                    {"id": "father_name", "type": "text", "label": {"en": "Father Name"}, "required": True},
+                    {"id": "gender", "type": "select", "label": {"en": "Gender"}},
+                ],
+            }
+        ]
+    }
+    # Safety net must not swap English to _pa.
+    after_ids, _ = apply_kb_field_ids(form, [APPLICANT_IDENTITY])
+    assert [f["id"] for f in after_ids["sections"][0]["fields"]][0] == "applicant_name"
+    paired, notes = ensure_punjabi_pairs(after_ids)
+    ids = [f["id"] for f in paired["sections"][0]["fields"]]
+    assert ids == [
+        "applicant_name",
+        "applicant_name_pa",
+        "father_name",
+        "father_name_pa",
+        "gender",
+    ]
+    assert paired["sections"][0]["fields"][0]["transliterationField"] == "applicant_name_pa"
+    assert any("father_name_pa" in n for n in notes)
+
+
+def test_depends_on_string_is_coerced_to_list():
+    form = {
+        "sections": [
+            {
+                "id": "s",
+                "fields": [
+                    {"id": "nomenclature", "type": "select", "dependsOn": "state"},
+                    {"id": "x", "type": "text", "dependsOnAny": "a, b"},
+                ],
+            }
+        ]
+    }
+    out = coerce_dependency_lists(form)
+    assert out["sections"][0]["fields"][0]["dependsOn"] == ["state"]
+    assert out["sections"][0]["fields"][1]["dependsOnAny"] == ["a", "b"]
 
 
 def test_templates_without_an_id_are_not_identity_entries():

@@ -186,9 +186,13 @@ SUPPORTED OPERATIONS (use only these):
   {{ "op": "addField",       "sectionId": "<section_id>",
      "value": {{ "id": "<new_id>", "type": "<FieldType>", "label": {{ "en": "<text>" }} }} }},
   {{ "op": "removeField",    "fieldId": "<id>" }},
+  {{ "op": "moveField",      "fieldId": "<id>", "afterFieldId": "<existing_id>" }},
+  {{ "op": "moveField",      "fieldId": "<id>", "sectionId": "<section_id>" }},
   {{ "op": "addColumn",      "tableId": "<table_id>",
      "value": {{ "id": "<column_id>", "type": "<TableColumnType>", "label": {{ "en": "<text>" }} }} }},
-  {{ "op": "removeColumn",   "tableId": "<table_id>", "fieldId": "<column_id>" }}
+  {{ "op": "removeColumn",   "tableId": "<table_id>", "fieldId": "<column_id>" }},
+  {{ "op": "moveColumn",     "tableId": "<table_id>", "fieldId": "<column_id>",
+     "afterFieldId": "<existing_column_id>" }}
 ]
 
 WORKFLOW BUILDER RULES FOR THIS CHANGE-SET:
@@ -196,6 +200,9 @@ WORKFLOW BUILDER RULES FOR THIS CHANGE-SET:
   (a new field created by addField, or a new column created by addColumn, are
   the only exceptions).
 - Never invent operation names (no updateColumn / updateField / updateSection).
+- Reorder an existing field with moveField (fieldId + afterFieldId,
+  beforeFieldId, or sectionId for a new/empty section). Do not addField a
+  copy of an existing id. Do not use setColumnProp for field order.
 - Never change a field's "id" or "order". Never set a section's "fields" array
   via setSectionProp.
 - Show/hide a SECTION with setSectionProp "visibleWhen" (values MUST be arrays
@@ -258,7 +265,8 @@ Remember the key workflow-builder rules:
 - Singleton types (activity_timeline, previous_history, role_wise_history): max one each.
 - Allowed change-set ops only: setProp, unsetProp, setSectionProp, unsetSectionProp,
   setColumnProp, unsetColumnProp, addOption, removeOption, addField, removeField,
-  addColumn, removeColumn. Never invent updateColumn / updateSection.
+  moveField, addColumn, removeColumn, moveColumn. Never invent updateColumn /
+  updateSection. Reorder with moveField, not setColumnProp.
 - Show/hide a section: setSectionProp visibleWhen; values MUST be arrays.
 
 VALIDATION ERRORS:
