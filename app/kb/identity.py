@@ -66,6 +66,8 @@ def identity_entries(entries: list[dict[str, Any]] | None) -> list[dict[str, Any
     out: list[dict[str, Any]] = []
     seen: set[str] = set()
     for e in entries or []:
+        if e.get("kind") in ("recommendation", "bundle"):
+            continue
         payload = e.get("payload")
         if (
             isinstance(payload, dict)

@@ -31,6 +31,10 @@ def select_kb_entries(
 
     selected: list[dict[str, Any]] = []
     for e in entries:
+        # Follow-up questions and insert bundles are consumed by the
+        # recommendation engine, not injected into the LLM prompt.
+        if e.get("kind") in ("recommendation", "bundle"):
+            continue
         applies = e.get("appliesTo") or {}
         modes = applies.get("modes") or []
         if modes and mode_key not in modes:

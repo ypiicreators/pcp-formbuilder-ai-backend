@@ -24,6 +24,9 @@ APPLYING_FOR_ID = "applying_for_yourself"
 #: Static list controls whose option `value` must be integer (not string labels).
 _STATIC_INT_OPTION_TYPES = frozenset({"select", "multiselect", "radio"})
 
+#: Boolean radios used across production forms and KB templates (YES/NO, not 1/2).
+_ALLOWED_BOOL_OPTION_VALUES = frozenset({"YES", "NO"})
+
 
 def _err(
     code: str,
@@ -66,8 +69,28 @@ def _check_duplicate_ids(index: FormIndex) -> list[ValidationError]:
 # --- 2. Static option values (integer) --------------------------------------
 
 
+def _is_allowed_static_option_value(val: Any) -> bool:
+    """Integers, booleans, numeric strings, and canonical YES/NO radios."""
+    if isinstance(val, bool):
+        return True
+    if isinstance(val, int):
+        return True
+    if isinstance(val, str):
+        s = val.strip()
+        if s.upper() in _ALLOWED_BOOL_OPTION_VALUES:
+            return True
+        if s.isdigit():
+            return True
+    return False
+
+
 def _check_static_option_values_integer(index: FormIndex) -> list[ValidationError]:
-    """Static select/radio/multiselect options use integer values (org / KB rule)."""
+    """Static select/radio/multiselect options use integer values (org / KB rule).
+
+    YES/NO (and yes/no) are allowed: production forms and KB templates use them
+    for applying-for / beneficiary / eKYC radios. String labels like 'MALE'
+    still fail.
+    """
     out: list[ValidationError] = []
     for entry in index.fields.values():
         node = entry.node
@@ -83,18 +106,17 @@ def _check_static_option_values_integer(index: FormIndex) -> list[ValidationErro
             if not isinstance(opt, dict) or "value" not in opt:
                 continue
             val = opt["value"]
-            if isinstance(val, bool):
+            if _is_allowed_static_option_value(val):
                 continue
-            if not isinstance(val, int):
-                out.append(_err(
-                    "static_option_value_not_integer",
-                    (
-                        f"field '{entry.id}' option[{i}] value must be an integer "
-                        f"for static lists (use 1, 2, 3 — not strings like "
-                        f"'MALE'); got {val!r}"
-                    ),
-                    field_id=entry.id,
-                ))
+            out.append(_err(
+                "static_option_value_not_integer",
+                (
+                    f"field '{entry.id}' option[{i}] value must be an integer "
+                    f"for static lists (use 1, 2, 3 — not strings like "
+                    f"'MALE'); got {val!r}"
+                ),
+                field_id=entry.id,
+            ))
     return out
 
 

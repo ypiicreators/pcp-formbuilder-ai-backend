@@ -224,6 +224,21 @@ class ClarificationResponse(BaseModel):
         default=False,
         description="Whether an 'apply to all matches' choice is offered.",
     )
+    form: dict[str, Any] | list[dict[str, Any]] | None = Field(
+        default=None,
+        description=(
+            "Optional form to apply before showing the question (KB follow-ups "
+            "after generate/edit so the canvas is not discarded)."
+        ),
+    )
+    warnings: list[str] = Field(
+        default_factory=list,
+        description="Non-fatal notes; used when a form is attached to a follow-up.",
+    )
+    diff: list[dict[str, Any]] | None = Field(
+        default=None,
+        description="Edit-mode diff for the form attached to a KB follow-up.",
+    )
 
 
 #: A single-turn response is either a proposal or a clarification request.

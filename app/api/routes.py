@@ -30,6 +30,14 @@ from app.config import get_settings
 from app.core.doc_trace import begin_trace, log_summary
 from app.core.generate_prompt_gate import assess_generate_prompt_sufficiency
 from app.db import mongo
+from app.kb.loader import fetch_live_kb
+from app.kb.recommendations import (
+    apply_followup_choice,
+    clarification_options,
+    clarification_question,
+    first_recommendation,
+    parse_followup_choice,
+)
 from app.models.schemas import (
     AssistRequest,
     ClarificationResponse,
@@ -210,7 +218,7 @@ async def assist_document(
         log_summary(logger, outcome)
 
     # Document mode creates a whole form (like generate): no "before" diff.
-    return GenerateResponse(form=result.form or {}, warnings=result.warnings, diff=None)
+    return await _kb_followup_response(result.form or {}, result.warnings, None)
 
 
 @router.post("/form-ai/assist-document-stream", tags=["form-ai"])
@@ -311,7 +319,12 @@ async def assist_document_stream(
                         delta_chars,
                         len((payload or {}).get("sections", [])) if isinstance(payload, dict) else -1,
                     )
-                    yield _sse({"type": "done", "form": payload})
+                    done_evt: dict = {"type": "done", "form": payload}
+                    if isinstance(payload, dict):
+                        follow = await _kb_followup_event(payload)
+                        if follow:
+                            done_evt.update(follow)
+                    yield _sse(done_evt)
                 elif event == "error":
                     outcome = "failed"
                     errs = payload if isinstance(payload, list) else [payload]
@@ -368,6 +381,43 @@ def _sse(obj: dict) -> str:
     return f"data: {_json.dumps(obj, ensure_ascii=False)}\n\n"
 
 
+async def _kb_followup_event(form: dict) -> dict | None:
+    """Published follow-up fields, or None if the form already satisfies the rule."""
+    try:
+        kb = await fetch_live_kb()
+        rec = first_recommendation(form, kb)
+    except Exception:
+        logger.exception("KB follow-up check failed")
+        return None
+    if not rec:
+        return None
+    return {
+        "status": "needs_clarification",
+        "question": clarification_question(rec),
+        "options": clarification_options(rec),
+        "allow_all": False,
+    }
+
+
+async def _kb_followup_response(
+    form: dict,
+    warnings: list[str] | None = None,
+    diff: list | None = None,
+) -> GenerateOutcome:
+    """If a published recommendation matches, ask before returning a proposal."""
+    follow = await _kb_followup_event(form)
+    if not follow:
+        return GenerateResponse(form=form, warnings=warnings or [], diff=diff)
+    return ClarificationResponse(
+        question=follow["question"],
+        options=follow["options"],
+        allow_all=False,
+        form=form,
+        warnings=warnings or [],
+        diff=diff,
+    )
+
+
 async def _run_generate(description: str) -> GenerateOutcome:
     """Drive the generate-mode pipeline and map its result to an HTTP response."""
     clarify = assess_generate_prompt_sufficiency(description)
@@ -383,13 +433,21 @@ async def _run_generate(description: str) -> GenerateOutcome:
     if result.status is GenerateStatus.FAILED:
         raise HTTPException(status_code=422, detail={"errors": result.errors})
 
-    return GenerateResponse(form=result.form or {}, warnings=result.warnings, diff=None)
+    return await _kb_followup_response(result.form or {}, result.warnings, None)
 
 
 async def _run_edit(
     base_json: dict, instruction: str, target_field_ids: list[str] | None = None
 ) -> GenerateOutcome:
     """Drive the edit-mode pipeline and map its result to an HTTP response."""
+    kb_choice = parse_followup_choice(instruction, target_field_ids)
+    if kb_choice:
+        kb = await fetch_live_kb()
+        form, warnings, err = apply_followup_choice(base_json, kb, kb_choice)
+        if err:
+            raise HTTPException(status_code=422, detail={"errors": [err]})
+        return GenerateResponse(form=form, warnings=warnings, diff=None)
+
     try:
         provider = get_provider()
     except LLMError as exc:
@@ -411,10 +469,8 @@ async def _run_edit(
     if result.status is EditStatus.FAILED:
         raise HTTPException(status_code=422, detail={"errors": result.errors})
 
-    return GenerateResponse(
-        form=result.form or {},
-        warnings=result.warnings,
-        diff=result.diff,
+    return await _kb_followup_response(
+        result.form or {}, result.warnings, result.diff
     )
 
 

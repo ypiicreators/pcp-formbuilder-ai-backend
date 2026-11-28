@@ -12,6 +12,8 @@ class KbKind(str, Enum):
     template = "template"
     api_endpoint = "api_endpoint"
     policy = "policy"
+    recommendation = "recommendation"
+    bundle = "bundle"
 
 
 class KbStatus(str, Enum):

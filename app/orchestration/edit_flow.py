@@ -212,7 +212,23 @@ def _parse_apply_validate(
 
     result = validate_form(bound)
     if not result.ok:
-        return _StepOutcome(ok=False, errors=result.error_messages())
+        preexisting = {
+            (e.code, e.field_id)
+            for e in validate_form(form).errors
+            if e.code == "static_option_value_not_integer"
+        }
+        blocking = [
+            e
+            for e in result.errors
+            if not (
+                e.code == "static_option_value_not_integer"
+                and (e.code, e.field_id) in preexisting
+            )
+        ]
+        if blocking:
+            return _StepOutcome(ok=False, errors=[str(e) for e in blocking])
+        # Canvas already had string option values; don't block a later edit.
+        kb_warnings.extend(str(e) for e in result.errors)
 
     return _StepOutcome(
         ok=True,

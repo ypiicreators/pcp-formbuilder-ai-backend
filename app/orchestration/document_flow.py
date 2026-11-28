@@ -461,7 +461,7 @@ async def run_document_flow_stream(
         attempts += 1
         yield progress_event(
             "repair",
-            f"Fixing validation issues (attempt {attempts} of {max_repair_attempts})…",
+            f"Optimizing the generated form (attempt {attempts} of {max_repair_attempts})…",
         )
         repair_prompt = _with_kb(
             build_repair_prompt(last_raw, last_errors, is_edit_mode=False), kb_block

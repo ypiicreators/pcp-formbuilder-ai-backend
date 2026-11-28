@@ -249,7 +249,7 @@ async def run_spec_enrich_flow_stream(
                 logger.warning("spec_enrich stream: LLM error: %s", exc)
 
     if enriched is None and raw_from_stream:
-        yield progress_event("repair", "Fixing the generated form…")
+        yield progress_event("repair", "Optimizing the generated form…")
         partial = _parse_and_validate(
             raw_from_stream, kb_identity=kb.entries if kb else None
         )
@@ -304,7 +304,7 @@ async def run_spec_enrich_flow_stream(
         yield validating_section(i, total, sec.title)
     outcome = _validate_enriched(sections, enriched, kb_entries=kb.entries if kb else None)
     if not outcome.ok:
-        yield progress_event("repair", "Fixing validation issues…")
+        yield progress_event("repair", "Optimizing the generated form…")
         repaired = await _repair_full_form(
             sections,
             enriched,

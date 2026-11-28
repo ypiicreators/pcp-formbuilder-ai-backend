@@ -480,10 +480,89 @@ TEMPLATES: list[KbCreateInput] = [
         payload={
             "id": "applying_for_yourself",
             "type": "applying_for",
+            "required": True,
+            "label": {
+                "en": "Are you applying for yourself?",
+                "pa": "ਕੀ ਤੁਸੀਂ ਆਪਣੇ ਲਈ ਅਰਜ਼ੀ ਦੇ ਰਹੇ ਹੋ?",
+            },
             "options": [
-                {"value": "YES", "label": {"en": "Yes"}},
-                {"value": "NO", "label": {"en": "No"}},
+                {"value": "YES", "label": {"en": "YES", "pa": "ਹਾਂ"}},
+                {"value": "NO", "label": {"en": "NO", "pa": "ਨਹੀਂ"}},
             ],
+        },
+    ),
+    _entry(
+        "std.apply_for_beneficiary",
+        KbKind.template,
+        "Select beneficiary from existing member",
+        "YES/NO radio shown when the citizen is not applying for themselves.",
+        ["apply for beneficiary", "existing member?"],
+        payload={
+            "id": "apply_for_beneficiary",
+            "type": "radio",
+            "required": True,
+            "label": {
+                "en": "Select Beneficiary from existing member?",
+                "pa": "ਮੌਜੂਦਾ ਮੈਂਬਰ ਵਿੱਚੋਂ ਲਾਭਪਾਤਰੀ ਚੁਣਨਾ ਚਾਹੁੰਦੇ ਹੋ?",
+            },
+            "visibleWhen": {"applying_for_yourself": ["NO"]},
+            "options": [
+                {"value": "YES", "label": {"en": "YES", "pa": "ਹਾਂ"}},
+                {"value": "NO", "label": {"en": "NO", "pa": "ਨਹੀਂ"}},
+            ],
+        },
+    ),
+    _entry(
+        "std.profile_member",
+        KbKind.template,
+        "Select profile member",
+        "Family-member dropdown; visible when applying for someone else and "
+        "choosing an existing profile member. Uses ref.profile_member_api.",
+        ["profile_member", "profile member", "select member"],
+        field_types=["select"],
+        payload={
+            "id": "profile_member",
+            "type": "select",
+            "required": True,
+            "label": {"en": "Select Member", "pa": "ਸਦੱਸ ਚੁਣੋ"},
+            "placeholder": {
+                "en": "Please select member",
+                "pa": "ਕਿਰਪਾ ਕਰਕੇ ਮੈਂਬਰ ਚੁਣੋ",
+            },
+            "visibleWhen": {
+                "applying_for_yourself": ["NO"],
+                "apply_for_beneficiary": ["YES"],
+            },
+            "clearOnHide": True,
+            "kbKey": "ref.profile_member_api",
+        },
+    ),
+    _entry(
+        "std.relation_with_beneficiary",
+        KbKind.template,
+        "Relation with beneficiary",
+        "Relation dropdown; visible when applying for someone else who is not "
+        "an existing profile member. Uses ref.relation_api.",
+        ["relation_with_beneficiary", "relation with beneficiary"],
+        field_types=["select"],
+        payload={
+            "id": "relation_with_beneficiary",
+            "type": "select",
+            "required": True,
+            "label": {
+                "en": "Relation with Beneficiary",
+                "pa": "ਲਾਭਪਾਤਰੀ ਨਾਲ ਸੰਬੰਧ",
+            },
+            "placeholder": {
+                "en": "Please select relation",
+                "pa": "ਕਿਰਪਾ ਕਰਕੇ ਸੰਬੰਧ ਚੁਣੋ",
+            },
+            "visibleWhen": {
+                "applying_for_yourself": ["NO"],
+                "apply_for_beneficiary": ["NO"],
+            },
+            "clearOnHide": True,
+            "kbKey": "ref.relation_api",
         },
     ),
     _entry(
@@ -528,7 +607,47 @@ TEMPLATES: list[KbCreateInput] = [
 ]
 
 
-CORE_PACK: list[KbCreateInput] = POLICIES + APIS + TEMPLATES
+FOLLOW_UPS: list[KbCreateInput] = [
+    _entry(
+        "rec.missing_applying_for_yourself",
+        KbKind.recommendation,
+        "Suggest applying-for-yourself when the form has no gate",
+        """
+If the form has no applying_for_yourself field, ask whether to add it.
+Yes inserts the field templates listed in this follow-up (gate + NO-branch
+member and relation fields). No leaves the form unchanged.
+""",
+        ["applying for yourself", "beneficiary"],
+        payload={
+            "missingFieldId": "applying_for_yourself",
+            "question": (
+                "This form has no “Are you applying for yourself?” field. "
+                "Do you want to add it?"
+            ),
+            "insertTemplates": [
+                "std.applying_for_yourself",
+                "std.apply_for_beneficiary",
+                "std.profile_member",
+                "std.relation_with_beneficiary",
+            ],
+            "insertAfterFieldId": "applicant_name_pa",
+        },
+    ),
+]
+
+
+CORE_PACK: list[KbCreateInput] = POLICIES + APIS + TEMPLATES + FOLLOW_UPS
+
+#: Entries the applying-for-yourself follow-up needs live in Assist.
+FOLLOWUP_TEST_KEYS: list[str] = [
+    "std.applying_for_yourself",
+    "std.apply_for_beneficiary",
+    "std.profile_member",
+    "std.relation_with_beneficiary",
+    "ref.relation_api",
+    "ref.profile_member_api",
+    "rec.missing_applying_for_yourself",
+]
 
 
 async def install(dry_run: bool = False) -> dict[str, list[str]]:
@@ -557,8 +676,75 @@ async def install(dry_run: bool = False) -> dict[str, list[str]]:
     return result
 
 
+async def upsert_and_publish_followup() -> dict[str, list[str]]:
+    """Create/update the test follow-up pack and publish it to the live release."""
+    from app.db import mongo
+    from app.kb import repository as repo
+    from app.kb import service
+    from app.kb.schemas import KbPublishInput, KbUpdateInput
+
+    by_key = {e.key: e for e in CORE_PACK}
+    result: dict[str, list[str]] = {"created": [], "updated": [], "unchanged": [], "published": []}
+
+    await mongo.connect()
+    try:
+        db = mongo.get_db()
+        await repo.ensure_indexes(db)
+        pending: list[str] = []
+        for key in FOLLOWUP_TEST_KEYS:
+            spec = by_key[key]
+            existing = await repo.get_entry(db, key)
+            if not existing:
+                await service.create_entry(db, spec, actor="core-pack")
+                result["created"].append(key)
+                pending.append(key)
+                continue
+            if existing.get("archived"):
+                await service.set_archived(db, key, False, actor="core-pack")
+                existing = await repo.get_entry(db, key)
+            inp = KbUpdateInput(
+                kind=spec.kind,
+                title=spec.title,
+                body=spec.body,
+                appliesTo=spec.appliesTo,
+                payload=spec.payload,
+                expectedVersion=int(existing["version"]),
+            )
+            before = int(existing["version"])
+            saved = await service.update_entry(db, key, inp, actor="core-pack")
+            if saved.version != before:
+                result["updated"].append(key)
+            else:
+                result["unchanged"].append(key)
+            if saved.publishedVersion != saved.version:
+                pending.append(key)
+
+        if pending:
+            release = await service.publish(
+                db,
+                KbPublishInput(
+                    note="Publish applying-for-yourself follow-up and field templates for Assist testing.",
+                    keys=pending,
+                ),
+                actor="core-pack",
+            )
+            result["published"] = pending
+            result["release"] = [release.id]
+        else:
+            result["published"] = []
+    finally:
+        await mongo.close()
+    return result
+
+
 def main() -> None:
     import sys
+
+    if "--publish-followup" in sys.argv:
+        out = asyncio.run(upsert_and_publish_followup())
+        for label, items in out.items():
+            print(f"{label} ({len(items)}):", *items, sep="\n  " if items else " ")
+        return
 
     out = asyncio.run(install(dry_run="--dry-run" in sys.argv))
     print(f"created ({len(out['created'])}):", *out["created"], sep="\n  ")
